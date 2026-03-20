@@ -12,6 +12,9 @@ struct SearchRequest: Codable, Sendable {
 
     /// Maximum number of results to return. Defaults to 20.
     let limit: Int?
+
+    /// Filter results to a specific application name.
+    let app_name: String?
 }
 
 // MARK: - Response Models

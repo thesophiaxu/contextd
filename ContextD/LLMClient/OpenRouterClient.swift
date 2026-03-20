@@ -10,33 +10,54 @@ final class OpenRouterClient: LLMClient, Sendable {
     /// Maximum number of retry attempts for transient errors.
     private let maxRetries = 3
 
-    // MARK: - API Key (plain text file in Application Support)
+    // MARK: - API Key (macOS Keychain via KeychainHelper)
 
-    /// Path to the API key file: ~/Library/Application Support/ContextD/api_key
-    static var apiKeyFileURL: URL {
+    private static let keychainKey = "openrouter_api_key"
+
+    /// Path to the legacy plaintext API key file, used only for migration.
+    private static var legacyAPIKeyFileURL: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
             .appendingPathComponent("ContextD", isDirectory: true)
             .appendingPathComponent("api_key")
     }
 
-    /// Read the API key from disk. Returns nil if the file doesn't exist or is empty.
-    static func readAPIKey() -> String? {
-        guard let raw = try? String(contentsOf: apiKeyFileURL, encoding: .utf8) else { return nil }
+    /// Migrate the API key from the legacy plaintext file to the Keychain.
+    /// Deletes the plaintext file after a successful migration.
+    static func migrateAPIKeyToKeychainIfNeeded() {
+        // If already in Keychain, nothing to do
+        guard !KeychainHelper.exists(key: keychainKey) else { return }
+
+        // Check for legacy plaintext file
+        guard let raw = try? String(contentsOf: legacyAPIKeyFileURL, encoding: .utf8) else { return }
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
+        guard !trimmed.isEmpty else { return }
+
+        do {
+            try KeychainHelper.save(key: keychainKey, value: trimmed)
+            try FileManager.default.removeItem(at: legacyAPIKeyFileURL)
+        } catch {
+            // Migration failed — key remains in the plaintext file for next attempt
+        }
     }
 
-    /// Write the API key to disk.
+    /// Read the API key from the Keychain. Returns nil if not stored.
+    static func readAPIKey() -> String? {
+        KeychainHelper.read(key: keychainKey)
+    }
+
+    /// Save the API key to the Keychain.
     static func saveAPIKey(_ key: String) throws {
-        let dir = apiKeyFileURL.deletingLastPathComponent()
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        try key.trimmingCharacters(in: .whitespacesAndNewlines)
-            .write(to: apiKeyFileURL, atomically: true, encoding: .utf8)
+        try KeychainHelper.save(key: keychainKey, value: key.trimmingCharacters(in: .whitespacesAndNewlines))
     }
 
-    /// Check whether an API key file exists and is non-empty.
+    /// Delete the API key from the Keychain.
+    static func deleteAPIKey() {
+        KeychainHelper.delete(key: keychainKey)
+    }
+
+    /// Check whether an API key exists in the Keychain.
     static func hasAPIKey() -> Bool {
-        readAPIKey() != nil
+        KeychainHelper.exists(key: keychainKey)
     }
 
     func complete(

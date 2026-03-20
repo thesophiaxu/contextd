@@ -51,6 +51,7 @@ actor SummarizationEngine {
 
     // MARK: - Settings Setters (for applying UserDefaults from outside the actor)
 
+    func setModel(_ value: String) { model = value }
     func setMaxTokens(_ value: Int) { maxTokens = value }
     func setMaxSamplesPerChunk(_ value: Int) { maxSamplesPerChunk = value }
     func setMaxDeltasPerKeyframe(_ value: Int) { maxDeltasPerKeyframe = value }

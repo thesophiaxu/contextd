@@ -79,6 +79,14 @@ final class ServiceContainer {
            let strategy = enrichment.strategies.first as? TwoPassLLMStrategy {
             let defaults = UserDefaults.standard
 
+            // Apply model selections from UserDefaults (persisted via @AppStorage in Settings)
+            if let p1Model = defaults.string(forKey: "enrichmentPass1Model"), !p1Model.isEmpty {
+                strategy.pass1Model = p1Model
+            }
+            if let p2Model = defaults.string(forKey: "enrichmentPass2Model"), !p2Model.isEmpty {
+                strategy.pass2Model = p2Model
+            }
+
             let maxSummP1 = defaults.integer(forKey: "maxSummariesForPass1")
             if maxSummP1 > 0 { strategy.maxSummariesForPass1 = maxSummP1 }
 
@@ -104,6 +112,9 @@ final class ServiceContainer {
             if maxDText > 0 { strategy.maxDeltaTextLength = maxDText }
         }
 
+        // Migrate API key from legacy plaintext file to Keychain if needed
+        OpenRouterClient.migrateAPIKeyToKeychainIfNeeded()
+
         let hasAPIKey = OpenRouterClient.hasAPIKey()
         logger.info("API key present: \(hasAPIKey)")
 
@@ -112,6 +123,11 @@ final class ServiceContainer {
                 Task {
                     // Apply user settings to summarization engine
                     let defaults = UserDefaults.standard
+
+                    // Apply model selection from UserDefaults (persisted via @AppStorage in Settings)
+                    if let sumModel = defaults.string(forKey: "summarizationModel"), !sumModel.isEmpty {
+                        await engine.setModel(sumModel)
+                    }
 
                     let sumMaxTokens = defaults.integer(forKey: "summarizationMaxTokens")
                     if sumMaxTokens > 0 { await engine.setMaxTokens(sumMaxTokens) }
@@ -134,7 +150,7 @@ final class ServiceContainer {
                 logger.error("summarizationEngine is nil — cannot start summarization")
             }
         } else {
-            logger.warning("No API key at \(OpenRouterClient.apiKeyFileURL.path) — summarization disabled")
+            logger.warning("No API key in Keychain — summarization disabled")
         }
 
         // Start the API server if enabled

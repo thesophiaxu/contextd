@@ -5,9 +5,9 @@ struct SettingsView: View {
     // API Settings
     @State private var apiKey: String = ""
     @State private var hasApiKey: Bool = false
-    @State private var summarizationModel: String = "anthropic/claude-haiku-4-5"
-    @State private var enrichmentPass1Model: String = "anthropic/claude-haiku-4-5"
-    @State private var enrichmentPass2Model: String = "anthropic/claude-sonnet-4-6"
+    @AppStorage("summarizationModel") private var summarizationModel: String = "anthropic/claude-haiku-4-5"
+    @AppStorage("enrichmentPass1Model") private var enrichmentPass1Model: String = "anthropic/claude-haiku-4-5"
+    @AppStorage("enrichmentPass2Model") private var enrichmentPass2Model: String = "anthropic/claude-sonnet-4-6"
 
     // Capture Settings
     @AppStorage("captureInterval") private var captureInterval: Double = 2.0

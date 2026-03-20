@@ -83,9 +83,10 @@ final class APIServer: Sendable {
     private func buildRouter() -> Router<BasicRequestContext> {
         let router = Router()
 
-        // CORS headers for browser-based API docs
+        // CORS headers — restrict to localhost origins only
+        let origin = "http://127.0.0.1:\(port)"
         router.addMiddleware {
-            CORSMiddleware(allowOrigin: .all)
+            CORSMiddleware(allowOrigin: .custom(origin))
         }
 
         // GET /health
@@ -136,21 +137,26 @@ final class APIServer: Sendable {
 
             let limit = min(searchRequest.limit ?? 20, 100)
             let timeRangeMinutes = searchRequest.time_range_minutes ?? 1440
+            let appName = searchRequest.app_name
+
+            log.info("Search request: text=\"\(text)\" limit=\(limit) time_range=\(timeRangeMinutes)m app_name=\(appName ?? "(all)")")
 
             let startTime = Date()
 
             do {
-                // FTS5 search over summaries
-                let ftsResults = try storage.searchSummaries(query: text, limit: limit)
-
-                // Also filter by time range if specified
-                let cutoff = Date().addingTimeInterval(-Double(timeRangeMinutes * 60))
-                let filtered = ftsResults.filter { $0.endDate >= cutoff }
+                // FTS5 search over summaries — time filter + app filter applied
+                // in SQL BEFORE LIMIT so results are correct
+                let ftsResults = try storage.searchSummaries(
+                    query: text,
+                    limit: limit,
+                    timeRangeMinutes: timeRangeMinutes,
+                    appName: appName
+                )
 
                 let isoFormatter = ISO8601DateFormatter()
 
                 // Convert summaries to citations
-                let citations: [Citation] = filtered.map { summary in
+                let citations: [Citation] = ftsResults.map { summary in
                     Citation(
                         timestamp: isoFormatter.string(from: summary.startDate),
                         app_name: summary.decodedAppNames.joined(separator: ", "),
@@ -173,6 +179,8 @@ final class APIServer: Sendable {
                         summaries_searched: ftsResults.count
                     )
                 )
+
+                log.info("Search completed: \(citations.count) results in \(Int(processingTime * 1000))ms")
 
                 return try Self.jsonResponse(queryResponse, status: .ok)
             } catch {

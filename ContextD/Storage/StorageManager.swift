@@ -172,20 +172,45 @@ final class StorageManager: Sendable {
     }
 
     /// Search summaries using FTS5 full-text search.
-    func searchSummaries(query: String, limit: Int = 20) throws -> [SummaryRecord] {
+    /// Time filter and app_name filter are applied in SQL BEFORE the LIMIT so
+    /// pagination (offset) returns correct results.
+    func searchSummaries(
+        query: String,
+        limit: Int = 20,
+        timeRangeMinutes: Int? = nil,
+        appName: String? = nil
+    ) throws -> [SummaryRecord] {
         let ftsQuery = sanitizeFTSQuery(query)
         guard !ftsQuery.isEmpty else { return [] }
 
         return try database.dbPool.read { db in
+            var conditions = ["summaries_fts MATCH ?"]
+            var arguments: [DatabaseValueConvertible] = [ftsQuery]
+
+            if let minutes = timeRangeMinutes {
+                let cutoff = Date().addingTimeInterval(-Double(minutes * 60)).timeIntervalSince1970
+                conditions.append("summaries.endTimestamp >= ?")
+                arguments.append(cutoff)
+            }
+
+            if let app = appName, !app.isEmpty {
+                // appNames is a JSON array string; use LIKE for substring match
+                conditions.append("summaries.appNames LIKE ?")
+                arguments.append("%\(app)%")
+            }
+
+            let whereClause = conditions.joined(separator: " AND ")
+            arguments.append(limit)
+
             let sql = """
                 SELECT summaries.*
                 FROM summaries
                 JOIN summaries_fts ON summaries.id = summaries_fts.rowid
-                WHERE summaries_fts MATCH ?
+                WHERE \(whereClause)
                 ORDER BY rank
                 LIMIT ?
                 """
-            return try SummaryRecord.fetchAll(db, sql: sql, arguments: [ftsQuery, limit])
+            return try SummaryRecord.fetchAll(db, sql: sql, arguments: StatementArguments(arguments))
         }
     }
 
@@ -378,7 +403,7 @@ final class StorageManager: Sendable {
     // MARK: - Helpers
 
     /// Sanitize a user query string for FTS5 matching.
-    /// Wraps each word in quotes to prevent FTS5 syntax errors from user input.
+    /// Wraps each word in quotes and joins with AND so all terms must match.
     private func sanitizeFTSQuery(_ query: String) -> String {
         let words = query.components(separatedBy: .whitespacesAndNewlines)
             .filter { !$0.isEmpty }
@@ -387,6 +412,6 @@ final class StorageManager: Sendable {
                 let cleaned = word.replacingOccurrences(of: "\"", with: "")
                 return "\"\(cleaned)\""
             }
-        return words.joined(separator: " OR ")
+        return words.joined(separator: " AND ")
     }
 }

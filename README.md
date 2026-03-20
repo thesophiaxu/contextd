@@ -202,3 +202,7 @@ Default retention is 7 days (configurable in Settings > Storage).
 ## License
 
 MIT
+
+## Acknowledgements
+
+

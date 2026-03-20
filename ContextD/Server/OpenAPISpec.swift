@@ -28,7 +28,7 @@ enum OpenAPISpec {
           "post": {
             "operationId": "searchSummaries",
             "summary": "Full-text search over activity summaries",
-            "description": "Search through activity summaries using FTS5 full-text search. This is a fast, local-only operation that does not call any LLM. Returns citations built directly from matching summary records.",
+            "description": "Search through activity summaries using FTS5 full-text search (AND semantics — all terms must match). Supports pagination via offset and filtering by app_name. This is a fast, local-only operation that does not call any LLM.",
             "requestBody": {
               "required": true,
               "content": {
@@ -295,6 +295,11 @@ enum OpenAPISpec {
                 "default": 20,
                 "minimum": 1,
                 "maximum": 100
+              },
+              "app_name": {
+                "type": "string",
+                "description": "Filter results to a specific application name (substring match).",
+                "examples": ["Google Chrome", "VS Code"]
               }
             }
           },
