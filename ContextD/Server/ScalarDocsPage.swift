@@ -1,7 +1,7 @@
 import Foundation
 
 /// Generates the Scalar API docs HTML page.
-/// Scalar is loaded from CDN — single HTML page, no build step needed.
+/// Scalar is loaded from CDN, single HTML page, no build step needed.
 enum ScalarDocsPage {
     static func html(port: Int) -> String {
         """

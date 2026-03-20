@@ -133,6 +133,53 @@ struct ActivityResponse: Codable, Sendable {
     let total: Int
 }
 
+// MARK: - Semantic Search Endpoint
+
+/// Request body for POST /v1/semantic-search
+struct SemanticSearchRequest: Codable, Sendable {
+    /// Natural language query for similarity matching against summaries.
+    let query: String
+
+    /// How far back to search, in minutes. Defaults to 1440 (24 hours).
+    let time_range_minutes: Int?
+
+    /// Maximum number of results to return. Defaults to 10.
+    let limit: Int?
+}
+
+/// A single semantic search result with similarity score.
+struct SemanticSearchResult: Codable, Sendable {
+    /// The matched summary.
+    let summary: SummaryItem
+
+    /// Cosine similarity score (0.0 to 1.0).
+    let similarity: Double
+}
+
+/// Response body for POST /v1/semantic-search
+struct SemanticSearchResponse: Codable, Sendable {
+    /// Results ranked by cosine similarity, descending.
+    let results: [SemanticSearchResult]
+
+    /// Processing metadata.
+    let metadata: SemanticSearchMetadata
+}
+
+/// Metadata for the semantic search response.
+struct SemanticSearchMetadata: Codable, Sendable {
+    /// The original query text.
+    let query: String
+
+    /// Time range searched, in minutes.
+    let time_range_minutes: Int
+
+    /// Wall-clock processing time in milliseconds.
+    let processing_time_ms: Int
+
+    /// Number of summaries with embeddings that were compared.
+    let summaries_compared: Int
+}
+
 /// Error response body.
 struct APIErrorResponse: Codable, Sendable {
     let error: String
