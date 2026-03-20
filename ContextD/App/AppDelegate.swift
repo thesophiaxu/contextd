@@ -19,13 +19,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let hasOnboarded = UserDefaults.standard.bool(forKey: "hasCompletedOnboarding")
         let permissionsOK = PermissionManager.shared.allPermissionsGranted
 
-        if !hasOnboarded || !permissionsOK {
-            logger.info("Opening onboarding window (onboarded=\(hasOnboarded), permissions=\(permissionsOK))")
+        if !hasOnboarded && !permissionsOK {
+            logger.info("First launch - opening onboarding window")
             showOnboardingWindow()
         } else {
-            logger.info("Already onboarded with permissions — starting services directly")
-            // Start services directly from AppDelegate — don't rely on the notification
-            // reaching MenuBarContent, which may not be rendered yet.
+            logger.info("Starting services (onboarded=\(hasOnboarded), permissions=\(permissionsOK))")
+            // Always start services if user has been through onboarding at least once.
+            // Permissions may report false after restart even when granted on macOS 15+.
             ServiceContainer.shared.startServices()
         }
     }
