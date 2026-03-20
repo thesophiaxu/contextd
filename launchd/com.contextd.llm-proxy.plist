@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.contextd.llm-proxy</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/amit/contextd/llm-proxy/run.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/amit/contextd/llm-proxy</string>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/amit/Library/Logs/contextd-llm-proxy.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/amit/Library/Logs/contextd-llm-proxy.err</string>
+</dict>
+</plist>
