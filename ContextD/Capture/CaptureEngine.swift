@@ -1,32 +1,45 @@
-import Foundation
+import AppKit
 import CoreGraphics
+import Foundation
+
+/// The overall state of the capture engine, observable by UI.
+enum CaptureState: String {
+    case recording
+    case paused
+    case privacyPaused
+    case sleeping
+}
 
 /// Coordinates the capture pipeline: screenshot -> pixel diff -> selective OCR -> store.
-/// Runs on a configurable timer (default 2s) with keyframe/delta compression.
+/// Runs on a configurable timer (default 5s) with keyframe/delta compression.
+/// Supports adaptive capture intervals that back off during idle periods.
 ///
 /// Pipeline flow:
-/// 1. Capture screenshot + accessibility metadata
-/// 2. If first capture or no previous image: KEYFRAME (full OCR)
-/// 3. Pixel diff against previous screenshot
-/// 4. 0% tiles changed -> skip entirely
-/// 5. >=50% tiles changed, app switch, or time cap -> KEYFRAME (full OCR)
-/// 6. Otherwise -> DELTA (OCR only changed regions)
+/// 1. Check privacy exclusion (skip if excluded app is frontmost)
+/// 2. Capture screenshot + accessibility metadata
+/// 3. If first capture or no previous image: KEYFRAME (full OCR)
+/// 4. Pixel diff against previous screenshot
+/// 5. 0% tiles changed -> skip entirely (adaptive interval backs off)
+/// 6. >=50% tiles changed, app switch, or time cap -> KEYFRAME (full OCR)
+/// 7. Otherwise -> DELTA (OCR only changed regions)
 @MainActor
 final class CaptureEngine: ObservableObject {
     @Published var isRunning: Bool = false
     @Published var captureCount: Int = 0
     @Published var lastCaptureTime: Date?
     @Published var lastError: String?
+    @Published var state: CaptureState = .paused
+    @Published var isPrivacyPaused: Bool = false
 
     private let screenCapture = ScreenCapture()
     private let ocrProcessor = OCRProcessor()
     private let accessibilityReader = AccessibilityReader()
     private let storageManager: StorageManager
 
-    private let logger = DualLogger(category: "CaptureEngine")
+    let logger = DualLogger(category: "CaptureEngine")
 
-    /// The interval between captures in seconds.
-    var captureInterval: TimeInterval = 2.0
+    /// The base interval between captures in seconds (used when adaptive is off).
+    var captureInterval: TimeInterval = 10.0
 
     /// Maximum time between keyframes in seconds.
     var maxKeyframeInterval: TimeInterval = 60
@@ -35,7 +48,7 @@ final class CaptureEngine: ObservableObject {
     let imageDiffer = ImageDiffer()
 
     /// The previous captured screenshot for pixel diffing (~8MB).
-    private var previousImage: CGImage?
+    var previousImage: CGImage?
 
     /// DB ID of the current keyframe.
     private var currentKeyframeId: Int64?
@@ -58,6 +71,102 @@ final class CaptureEngine: ObservableObject {
     /// The background capture task.
     private var captureTask: Task<Void, Never>?
 
+    /// Whether the system is sleeping (pauses capture without stopping).
+    var isSleeping = false
+
+    // MARK: - Adaptive Capture Interval
+
+    /// Whether adaptive interval scaling is enabled. Stored in UserDefaults.
+    var adaptiveIntervalEnabled: Bool = true
+
+    /// Capture speed preset. Controls base interval and adaptive tier scaling.
+    enum CaptureSpeed: String, CaseIterable, Sendable {
+        case fast   // 5/10/20/40s  - frequent captures, higher battery
+        case medium // 10/20/30/45s - balanced (default)
+        case slow   // 30/60/90/180s - minimal captures, lowest battery
+
+        var baseInterval: TimeInterval {
+            switch self {
+            case .fast:   return 5.0
+            case .medium: return 10.0
+            case .slow:   return 30.0
+            }
+        }
+
+        var tiers: (tier1: TimeInterval, tier2: TimeInterval, tier3: TimeInterval) {
+            switch self {
+            case .fast:   return (10.0, 20.0, 40.0)
+            case .medium: return (20.0, 30.0, 45.0)
+            case .slow:   return (60.0, 90.0, 180.0)
+            }
+        }
+
+        var label: String {
+            switch self {
+            case .fast:   return "Fast"
+            case .medium: return "Medium"
+            case .slow:   return "Slow"
+            }
+        }
+    }
+
+    /// Current capture speed preset. Stored in UserDefaults.
+    /// @Published so SwiftUI observes changes from the speed picker.
+    @Published var captureSpeed: CaptureSpeed = .medium {
+        didSet {
+            captureInterval = captureSpeed.baseInterval
+            UserDefaults.standard.set(captureSpeed.rawValue, forKey: "captureSpeed")
+        }
+    }
+
+    /// Count of consecutive skipped frames (no pixel change detected).
+    internal(set) var consecutiveSkips: Int = 0
+
+    /// The current effective capture interval, accounting for adaptive backoff,
+    /// low power mode, and thermal state.
+    var currentInterval: TimeInterval {
+        var interval = adaptiveIntervalEnabled ? adaptiveInterval : captureInterval
+
+        // Low Power Mode: enforce minimum 5s
+        if ProcessInfo.processInfo.isLowPowerModeEnabled {
+            interval = max(interval, 5.0)
+        }
+
+        // Thermal throttling: enforce minimum 10s for serious/critical
+        let thermal = ProcessInfo.processInfo.thermalState
+        if thermal == .serious || thermal == .critical {
+            interval = max(interval, 10.0)
+        }
+
+        return interval
+    }
+
+    /// Compute the adaptive interval from consecutive skip count using current speed preset.
+    private var adaptiveInterval: TimeInterval {
+        let tiers = captureSpeed.tiers
+        switch consecutiveSkips {
+        case 0...2:   return captureInterval    // active work
+        case 3...5:   return tiers.tier1        // slowing down
+        case 6...10:  return tiers.tier2        // mostly static
+        default:      return tiers.tier3        // reading/idle
+        }
+    }
+
+    // MARK: - App Privacy Exclusion
+
+    /// Default set of apps excluded from capture (password managers, system settings).
+    static let defaultExcludedApps: Set<String> = [
+        "com.1password.1password",
+        "com.agilebits.onepassword7",
+        "com.bitwarden.desktop",
+        "com.lastpass.LastPass",
+        "com.apple.keychainaccess",
+        "com.apple.systempreferences",
+    ]
+
+    /// Bundle IDs of apps that should pause capture when frontmost.
+    var excludedAppBundleIDs: Set<String> = []
+
     init(storageManager: StorageManager) {
         self.storageManager = storageManager
 
@@ -72,20 +181,56 @@ final class CaptureEngine: ObservableObject {
             self.lastKeyframeTime = lastKF.date
             self.lastKeyframeAppName = lastKF.appName
         }
+
+        // Load excluded apps from UserDefaults (fall back to defaults)
+        if let savedApps = UserDefaults.standard.stringArray(forKey: "excludedApps") {
+            self.excludedAppBundleIDs = Set(savedApps)
+        } else {
+            self.excludedAppBundleIDs = Self.defaultExcludedApps
+        }
+
+        // Load adaptive interval preference (default: enabled)
+        let hasKey = UserDefaults.standard.object(forKey: "adaptiveIntervalEnabled") != nil
+        self.adaptiveIntervalEnabled = hasKey
+            ? UserDefaults.standard.bool(forKey: "adaptiveIntervalEnabled")
+            : true
+
+        // Load capture speed preset (default: medium)
+        if let rawSpeed = UserDefaults.standard.string(forKey: "captureSpeed"),
+           let speed = CaptureSpeed(rawValue: rawSpeed) {
+            self.captureSpeed = speed
+            self.captureInterval = speed.baseInterval
+        }
     }
 
     /// Start the capture loop.
     func start() {
         guard !isRunning else { return }
         isRunning = true
+        isSleeping = false
+        consecutiveSkips = 0
         lastError = nil
-        logger.info("Capture engine started (interval: \(self.captureInterval)s, keyframe cap: \(self.maxKeyframeInterval)s)")
+        state = .recording
+        logger.info("Capture engine started (base interval: \(self.captureInterval)s, adaptive: \(self.adaptiveIntervalEnabled), keyframe cap: \(self.maxKeyframeInterval)s)")
+
+        registerSleepWakeObservers()
 
         captureTask = Task { [weak self] in
             guard let self = self else { return }
             while !Task.isCancelled && self.isRunning {
-                await self.performCapture()
-                try? await Task.sleep(nanoseconds: UInt64(self.captureInterval * 1_000_000_000))
+                if !self.isSleeping {
+                    let cycleStart = ContinuousClock.now
+                    await self.performCapture()
+                    let interval = self.currentInterval
+                    let elapsed = ContinuousClock.now - cycleStart
+                    let remaining = Duration.seconds(interval) - elapsed
+                    if remaining > .zero {
+                        try? await Task.sleep(for: remaining)
+                    }
+                } else {
+                    // While sleeping, poll infrequently instead of busy-waiting
+                    try? await Task.sleep(for: .seconds(1))
+                }
             }
         }
     }
@@ -95,12 +240,40 @@ final class CaptureEngine: ObservableObject {
         isRunning = false
         captureTask?.cancel()
         captureTask = nil
+        consecutiveSkips = 0
+        state = .paused
+        removeSleepWakeObservers()
         logger.info("Capture engine stopped")
     }
 
     /// Perform a single capture cycle.
+    ///
+    /// Note: No screen-sharing check is needed here. CGDisplayCreateImage is
+    /// a read-only API that coexists with Zoom/Teams/FaceTime screen sharing
+    /// without interference. See ScreenCapture.swift for details.
     private func performCapture() async {
+        // Belt-and-suspenders guard: do not capture during sleep/lock
+        // even if the loop check was somehow bypassed.
+        guard !isSleeping else { return }
+
         do {
+            // Step 0: Check privacy exclusion before any screenshot
+            if let frontApp = NSWorkspace.shared.frontmostApplication,
+               let bundleID = frontApp.bundleIdentifier,
+               excludedAppBundleIDs.contains(bundleID) {
+                if !isPrivacyPaused {
+                    isPrivacyPaused = true
+                    state = .privacyPaused
+                    logger.debug("Privacy pause: excluded app \(bundleID) is frontmost")
+                }
+                return
+            }
+            if isPrivacyPaused {
+                isPrivacyPaused = false
+                state = .recording
+                logger.debug("Privacy pause ended, resuming capture")
+            }
+
             // Step 1: Read accessibility metadata
             let metadata = accessibilityReader.readCurrentState()
 
@@ -111,17 +284,18 @@ final class CaptureEngine: ObservableObject {
             }
 
             // Step 3: Determine frame type via pixel diff
-            let frameDecision = determineFrameType(
+            let frameDecision = await determineFrameType(
                 currentImage: image,
                 appName: metadata.appName
             )
 
             switch frameDecision {
             case .skip:
-                logger.debug("Skipping capture (0% change)")
+                recordSkip()
                 return
 
             case .keyframe(let diffResult):
+                recordActivity()
                 try await handleKeyframe(
                     image: image,
                     metadata: metadata,
@@ -129,6 +303,7 @@ final class CaptureEngine: ObservableObject {
                 )
 
             case .delta(let diffResult):
+                recordActivity()
                 try await handleDelta(
                     image: image,
                     metadata: metadata,
@@ -153,15 +328,19 @@ final class CaptureEngine: ObservableObject {
         case delta(DiffResult)
     }
 
-    private func determineFrameType(currentImage: CGImage, appName: String) -> FrameDecision {
+    private func determineFrameType(currentImage: CGImage, appName: String) async -> FrameDecision {
         // First capture / after restart -> force keyframe
         guard let prevImage = previousImage else {
             logger.debug("No previous image, forcing keyframe")
             return .keyframe(nil)
         }
 
-        // Compute pixel diff
-        let diffResult = imageDiffer.diff(current: currentImage, previous: prevImage)
+        // Compute pixel diff off MainActor (CPU-intensive work).
+        // Safe: only one diff runs at a time (sequential capture loop).
+        nonisolated(unsafe) let differ = imageDiffer
+        let diffResult = await Task.detached(priority: .userInitiated) {
+            differ.diff(current: currentImage, previous: prevImage)
+        }.value
 
         // 0% tiles changed -> skip entirely
         if diffResult.tileDiff.changedTiles.isEmpty {
@@ -259,7 +438,9 @@ final class CaptureEngine: ObservableObject {
         }.value
 
         let deltaText = ocrResult.fullText
-        let fullOcrText = (currentKeyframeText ?? "") + (deltaText.isEmpty ? "" : "\n" + deltaText)
+        // Store only the delta text, not keyframe+delta concatenated.
+        // The keyframe text is already stored in the keyframe record.
+        let fullOcrText = deltaText.isEmpty ? (currentKeyframeText ?? "") : deltaText
 
         // Hash dedup on fullOcrText
         let normalizedText = fullOcrText.normalizedForDedup

@@ -25,8 +25,25 @@ final class ServiceContainer {
     private init() {
         llmClient = OpenRouterClient()
 
+        let logFile = "/tmp/contextd-debug.log"
+        func debugLog(_ msg: String) {
+            let line = "[\(Date())] \(msg)\n"
+            if let data = line.data(using: .utf8) {
+                if FileManager.default.fileExists(atPath: logFile) {
+                    let handle = FileHandle(forWritingAtPath: logFile)!
+                    handle.seekToEndOfFile()
+                    handle.write(data)
+                    handle.closeFile()
+                } else {
+                    FileManager.default.createFile(atPath: logFile, contents: data)
+                }
+            }
+        }
+
         do {
+            debugLog("Creating database...")
             let db = try AppDatabase()
+            debugLog("Database created OK")
             let storage = StorageManager(database: db)
 
             database = db
@@ -42,6 +59,7 @@ final class ServiceContainer {
 
             logger.info("ServiceContainer initialized successfully")
         } catch {
+            debugLog("INIT FAILED: \(error)")
             logger.error("Failed to initialize services: \(error.localizedDescription)")
             database = nil
             storageManager = nil
@@ -55,9 +73,11 @@ final class ServiceContainer {
 
     /// Start capture + summarization. Call once after permissions are confirmed.
     func startServices() {
-        guard PermissionManager.shared.allPermissionsGranted else {
-            logger.warning("Cannot start services: missing permissions")
-            return
+        // On macOS 15+, CGPreflightScreenCaptureAccess() can return false even after
+        // the user grants permission until the app is restarted. We proceed anyway and
+        // let individual capture calls fail gracefully if permissions are truly missing.
+        if !PermissionManager.shared.allPermissionsGranted {
+            logger.warning("Permissions may not be fully detected yet - starting services anyway")
         }
 
         // Apply user settings to capture engine
@@ -68,8 +88,10 @@ final class ServiceContainer {
             let maxKFInterval = UserDefaults.standard.double(forKey: "maxKeyframeInterval")
             if maxKFInterval > 0 { engine.maxKeyframeInterval = maxKFInterval }
 
-            let threshold = UserDefaults.standard.double(forKey: "keyframeChangeThreshold")
-            if threshold > 0 { engine.imageDiffer.significantChangeThreshold = threshold }
+            // significantChangeThreshold is a let constant on ImageDiffer (thread safety)
+
+            // Adaptive interval and privacy exclusion are loaded in CaptureEngine.init
+            // via UserDefaults, so no explicit wiring needed here.
         }
 
         captureEngine?.start()
@@ -105,13 +127,20 @@ final class ServiceContainer {
         }
 
         let hasAPIKey = OpenRouterClient.hasAPIKey()
-        logger.info("API key present: \(hasAPIKey)")
+        let usingProxy = OpenRouterClient.isUsingProxy
+        let sumMode = SummarizationMode.current
+        logger.info("API key present: \(hasAPIKey), proxy: \(usingProxy), mode: \(sumMode.rawValue)")
 
-        if hasAPIKey {
+        // When using a local claude -p proxy, no API key is needed.
+        let canSummarize = usingProxy || hasAPIKey
+
+        if canSummarize {
             if let engine = summarizationEngine {
                 Task {
                     // Apply user settings to summarization engine
                     let defaults = UserDefaults.standard
+
+                    await engine.setMode(sumMode)
 
                     let sumMaxTokens = defaults.integer(forKey: "summarizationMaxTokens")
                     if sumMaxTokens > 0 { await engine.setMaxTokens(sumMaxTokens) }
@@ -131,10 +160,10 @@ final class ServiceContainer {
                     await engine.start()
                 }
             } else {
-                logger.error("summarizationEngine is nil — cannot start summarization")
+                logger.error("summarizationEngine is nil -- cannot start summarization")
             }
         } else {
-            logger.warning("No API key at \(OpenRouterClient.apiKeyFileURL.path) — summarization disabled")
+            logger.warning("No API key found and mode is \(sumMode.rawValue) -- summarization disabled")
         }
 
         // Start the API server if enabled

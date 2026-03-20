@@ -9,11 +9,17 @@ enum Chunker {
         let startTime: Date
         let endTime: Date
 
-        /// The primary app name for this chunk (most frequent).
+        /// The primary app name for this chunk (most frequent, ties broken alphabetically).
         var primaryApp: String {
             let appCounts = Dictionary(grouping: captures, by: \.appName)
                 .mapValues { $0.count }
-            return appCounts.max(by: { $0.value < $1.value })?.key ?? "Unknown"
+            // Sort by count descending, then alphabetically ascending to break ties deterministically
+            return appCounts
+                .sorted { lhs, rhs in
+                    if lhs.value != rhs.value { return lhs.value > rhs.value }
+                    return lhs.key < rhs.key
+                }
+                .first?.key ?? "Unknown"
         }
 
         /// All unique app names in this chunk.
@@ -21,9 +27,26 @@ enum Chunker {
             Array(Set(captures.map(\.appName))).sorted()
         }
 
-        /// The primary window title (from the most recent capture).
+        /// The primary window title: most frequent window title for the primary app,
+        /// with ties broken alphabetically for determinism.
         var primaryWindowTitle: String? {
-            captures.last?.windowTitle
+            let app = primaryApp
+            let appCaptures = captures.filter { $0.appName == app }
+            let titleCounts = Dictionary(
+                grouping: appCaptures.compactMap(\.windowTitle),
+                by: { $0 }
+            ).mapValues { $0.count }
+
+            guard !titleCounts.isEmpty else {
+                return appCaptures.last?.windowTitle
+            }
+
+            return titleCounts
+                .sorted { lhs, rhs in
+                    if lhs.value != rhs.value { return lhs.value > rhs.value }
+                    return lhs.key < rhs.key
+                }
+                .first?.key
         }
 
         /// Capture IDs in this chunk.
@@ -89,7 +112,7 @@ enum Chunker {
 
         for capture in captures.dropFirst() {
             if capture.appName != currentApp {
-                // App changed — close current chunk
+                // App changed - close current chunk
                 let chunk = Chunk(
                     captures: currentChunk,
                     startTime: Date(timeIntervalSince1970: currentChunk.first!.timestamp),

@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.contextd.obsidian-sync</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/python3</string>
+        <string>/Users/amit/contextd/scripts/obsidian-sync.py</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/amit/contextd/scripts</string>
+
+    <key>StartInterval</key>
+    <integer>900</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/amit/Library/Logs/contextd-obsidian-sync.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/amit/Library/Logs/contextd-obsidian-sync.log</string>
+</dict>
+</plist>

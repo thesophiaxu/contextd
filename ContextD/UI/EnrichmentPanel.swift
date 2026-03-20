@@ -8,6 +8,7 @@ struct EnrichmentPanel: View {
     @State private var promptText: String = ""
     @State private var selectedTimeRange: TimeRangeOption = .thirtyMinutes
     @State private var showCopied: Bool = false
+    @FocusState private var isPromptFocused: Bool
 
     enum TimeRangeOption: String, CaseIterable, Identifiable {
         case fiveMinutes = "5 min"
@@ -55,6 +56,7 @@ struct EnrichmentPanel: View {
                     .foregroundStyle(.secondary)
 
                 TextEditor(text: $promptText)
+                    .focused($isPromptFocused)
                     .font(.system(.body, design: .monospaced))
                     .frame(minHeight: 80, maxHeight: 150)
                     .scrollContentBackground(.hidden)
@@ -141,6 +143,9 @@ struct EnrichmentPanel: View {
         }
         .padding(20)
         .frame(width: 600)
+        .onAppear {
+            isPromptFocused = true
+        }
     }
 
     private func enrich() {
@@ -160,7 +165,8 @@ struct EnrichmentPanel: View {
         pasteboard.setString(result.enrichedPrompt, forType: .string)
 
         showCopied = true
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+        Task {
+            try? await Task.sleep(for: .seconds(2))
             showCopied = false
         }
     }

@@ -15,7 +15,7 @@ struct DebugTimelineView: View {
     @State private var selectedTab: Tab = .captures
     @State private var selectedCapture: CaptureRecord?
     @State private var autoRefresh: Bool = true
-    @State private var refreshTimer: Timer?
+    @State private var refreshError: String?
 
     enum Tab: String, CaseIterable, Identifiable {
         case captures = "Captures"
@@ -52,12 +52,20 @@ struct DebugTimelineView: View {
             }
         }
         .frame(minWidth: 700, minHeight: 500)
-        .onAppear { startRefresh() }
-        .onDisappear { stopRefresh() }
+        .task(id: autoRefresh) {
+            refresh()
+            guard autoRefresh else { return }
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(3))
+                guard !Task.isCancelled else { break }
+                refresh()
+            }
+        }
     }
 
     // MARK: - Toolbar
 
+    @ViewBuilder
     private var toolbar: some View {
         HStack {
             Text("Database Debug")
@@ -80,9 +88,6 @@ struct DebugTimelineView: View {
             Toggle("Auto-refresh", isOn: $autoRefresh)
                 .toggleStyle(.switch)
                 .controlSize(.small)
-                .onChange(of: autoRefresh) { _, newValue in
-                    if newValue { startRefresh() } else { stopRefresh() }
-                }
 
             Button(action: refresh) {
                 Image(systemName: "arrow.clockwise")
@@ -92,6 +97,19 @@ struct DebugTimelineView: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
+
+        if let error = refreshError {
+            HStack {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.red)
+                Text(error)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                Spacer()
+            }
+            .padding(.horizontal, 12)
+            .padding(.bottom, 4)
+        }
     }
 
     // MARK: - Captures Tab
@@ -275,8 +293,9 @@ struct DebugTimelineView: View {
 
     private func refresh() {
         do {
+            let last24h = Date.now.addingTimeInterval(-24 * 60 * 60)
             captures = try storageManager.captures(
-                from: Date.distantPast,
+                from: last24h,
                 to: Date(),
                 limit: 200
             )
@@ -284,8 +303,9 @@ struct DebugTimelineView: View {
             captureCount = try storageManager.captureCount()
             summaryCount = try storageManager.summaryCount()
             dbSizeBytes = try storageManager.databaseSizeBytes()
+            refreshError = nil
         } catch {
-            // Silently ignore refresh errors in debug view
+            refreshError = "Refresh failed: \(error.localizedDescription)"
         }
     }
 
@@ -296,22 +316,11 @@ struct DebugTimelineView: View {
         }
         do {
             searchResults = try storageManager.searchCaptures(query: searchQuery, limit: 100)
+            refreshError = nil
         } catch {
             searchResults = []
+            refreshError = "Search failed: \(error.localizedDescription)"
         }
-    }
-
-    private func startRefresh() {
-        refresh()
-        guard autoRefresh else { return }
-        refreshTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { _ in
-            Task { @MainActor in refresh() }
-        }
-    }
-
-    private func stopRefresh() {
-        refreshTimer?.invalidate()
-        refreshTimer = nil
     }
 
     private func formatBytes(_ bytes: Int64) -> String {

@@ -28,13 +28,15 @@ protocol LLMClient: Sendable {
     ///   - maxTokens: Maximum tokens in the response.
     ///   - systemPrompt: Optional system prompt.
     ///   - temperature: Sampling temperature (0.0 = deterministic).
+    ///   - responseFormat: Optional response format (e.g., "json_object").
     /// - Returns: The LLM's response text.
     func complete(
         messages: [LLMMessage],
         model: String,
         maxTokens: Int,
         systemPrompt: String?,
-        temperature: Double
+        temperature: Double,
+        responseFormat: String?
     ) async throws -> String
 
     /// Send a completion request and return the full response including token usage.
@@ -43,7 +45,8 @@ protocol LLMClient: Sendable {
         model: String,
         maxTokens: Int,
         systemPrompt: String?,
-        temperature: Double
+        temperature: Double,
+        responseFormat: String?
     ) async throws -> LLMResponse
 }
 
@@ -54,14 +57,16 @@ extension LLMClient {
         model: String,
         maxTokens: Int = 4096,
         systemPrompt: String? = nil,
-        temperature: Double = 0.0
+        temperature: Double = 0.0,
+        responseFormat: String? = nil
     ) async throws -> String {
         try await complete(
             messages: messages,
             model: model,
             maxTokens: maxTokens,
             systemPrompt: systemPrompt,
-            temperature: temperature
+            temperature: temperature,
+            responseFormat: responseFormat
         )
     }
 
@@ -70,14 +75,16 @@ extension LLMClient {
         model: String,
         maxTokens: Int = 4096,
         systemPrompt: String? = nil,
-        temperature: Double = 0.0
+        temperature: Double = 0.0,
+        responseFormat: String? = nil
     ) async throws -> LLMResponse {
         try await completeWithUsage(
             messages: messages,
             model: model,
             maxTokens: maxTokens,
             systemPrompt: systemPrompt,
-            temperature: temperature
+            temperature: temperature,
+            responseFormat: responseFormat
         )
     }
 }

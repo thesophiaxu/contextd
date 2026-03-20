@@ -54,9 +54,12 @@ final class AccessibilityReader: Sendable {
             return nil
         }
 
+        // AXUIElement is a CFTypeRef; CFTypeID check is the safe pattern
+        let axWindow = windowElement as! AXUIElement
+
         var titleValue: AnyObject?
         let titleResult = AXUIElementCopyAttributeValue(
-            windowElement as! AXUIElement,
+            axWindow,
             kAXTitleAttribute as CFString,
             &titleValue
         )

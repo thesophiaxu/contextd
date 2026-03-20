@@ -89,11 +89,76 @@ enum OpenAPISpec {
             }
           }
         },
+        "/v1/semantic-search": {
+          "post": {
+            "operationId": "semanticSearchSummaries",
+            "summary": "Semantic similarity search over activity summaries",
+            "description": "Search summaries using TF-IDF cosine similarity. Builds a vocabulary from recent summaries and ranks results by semantic relevance. No external API calls. Embeddings are cached in the database for fast repeated queries.",
+            "requestBody": {
+              "required": true,
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/SemanticSearchRequest"
+                  },
+                  "examples": {
+                    "simple": {
+                      "summary": "Simple semantic query",
+                      "value": {
+                        "query": "debugging network timeout issues"
+                      }
+                    },
+                    "with_options": {
+                      "summary": "Semantic search with options",
+                      "value": {
+                        "query": "working on authentication flow",
+                        "time_range_minutes": 720,
+                        "limit": 5
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "responses": {
+              "200": {
+                "description": "Semantic search results ranked by similarity",
+                "content": {
+                  "application/json": {
+                    "schema": {
+                      "$ref": "#/components/schemas/SemanticSearchResponse"
+                    }
+                  }
+                }
+              },
+              "400": {
+                "description": "Invalid request",
+                "content": {
+                  "application/json": {
+                    "schema": {
+                      "$ref": "#/components/schemas/ErrorResponse"
+                    }
+                  }
+                }
+              },
+              "500": {
+                "description": "Internal server error",
+                "content": {
+                  "application/json": {
+                    "schema": {
+                      "$ref": "#/components/schemas/ErrorResponse"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
         "/v1/summaries": {
           "get": {
             "operationId": "listSummaries",
             "summary": "List activity summaries within a time range",
-            "description": "Returns all progressive summaries within the last N minutes, ordered by most recent first. No LLM calls — reads directly from the database.",
+            "description": "Returns all progressive summaries within the last N minutes, ordered by most recent first. No LLM calls -- reads directly from the database.",
             "parameters": [
               {
                 "name": "minutes",
@@ -532,6 +597,85 @@ enum OpenAPISpec {
                 "type": "string",
                 "nullable": true,
                 "description": "Human-readable error description."
+              }
+            }
+          },
+          "SemanticSearchRequest": {
+            "type": "object",
+            "required": ["query"],
+            "properties": {
+              "query": {
+                "type": "string",
+                "description": "Natural language query for semantic similarity matching.",
+                "minLength": 1,
+                "examples": ["debugging network timeout issues"]
+              },
+              "time_range_minutes": {
+                "type": "integer",
+                "description": "How far back to search, in minutes. Defaults to 1440 (24 hours). Maximum 1440.",
+                "default": 1440,
+                "minimum": 1,
+                "maximum": 1440
+              },
+              "limit": {
+                "type": "integer",
+                "description": "Maximum number of results to return. Defaults to 10. Maximum 100.",
+                "default": 10,
+                "minimum": 1,
+                "maximum": 100
+              }
+            }
+          },
+          "SemanticSearchResponse": {
+            "type": "object",
+            "required": ["results", "metadata"],
+            "properties": {
+              "results": {
+                "type": "array",
+                "description": "Results ranked by cosine similarity, descending.",
+                "items": {
+                  "$ref": "#/components/schemas/SemanticSearchResult"
+                }
+              },
+              "metadata": {
+                "$ref": "#/components/schemas/SemanticSearchMetadata"
+              }
+            }
+          },
+          "SemanticSearchResult": {
+            "type": "object",
+            "required": ["summary", "similarity"],
+            "properties": {
+              "summary": {
+                "$ref": "#/components/schemas/SummaryItem"
+              },
+              "similarity": {
+                "type": "number",
+                "description": "Cosine similarity score between 0.0 and 1.0.",
+                "minimum": 0,
+                "maximum": 1
+              }
+            }
+          },
+          "SemanticSearchMetadata": {
+            "type": "object",
+            "required": ["query", "time_range_minutes", "processing_time_ms", "summaries_compared"],
+            "properties": {
+              "query": {
+                "type": "string",
+                "description": "The original query text."
+              },
+              "time_range_minutes": {
+                "type": "integer",
+                "description": "The time range that was searched, in minutes."
+              },
+              "processing_time_ms": {
+                "type": "integer",
+                "description": "Total processing time in milliseconds."
+              },
+              "summaries_compared": {
+                "type": "integer",
+                "description": "Number of summaries with embeddings that were compared."
               }
             }
           }

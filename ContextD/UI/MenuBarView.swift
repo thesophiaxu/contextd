@@ -1,138 +1,113 @@
 import SwiftUI
 
-/// Menu bar dropdown view with capture status, controls, and navigation.
+/// Rich menu bar dropdown panel with status, stats, recent activity, and actions.
 ///
 /// Values are snapshotted once when the menu opens to avoid continuous
-/// re-renders (which cause flashing and selection jumps in MenuBarExtra).
+/// re-renders (which cause flashing in MenuBarExtra windows).
 struct MenuBarView: View {
-    var captureEngine: CaptureEngine
+    @ObservedObject var captureEngine: CaptureEngine
     @ObservedObject var permissionManager: PermissionManager
     var storageManager: StorageManager?
 
     var onOpenEnrichment: () -> Void
     var onOpenDebug: () -> Void
 
-    // Snapshotted values — populated once on appear, not live-bound.
-    @State private var isRunning: Bool = false
-    @State private var captureCount: Int = 0
-    @State private var lastCaptureTime: Date?
+    // Snapshotted values -- refreshed each time the menu opens.
+    @State private var captureCount24h: Int = 0
+    @State private var summaryCount24h: Int = 0
+    @State private var estimatedCostToday: Double = 0
+    @State private var recentCaptures: [CaptureRecord] = []
     @State private var lastError: String?
-    @State private var summarizerUsage: TokenUsageTotals?
-    @State private var hasAppeared = false
 
     var body: some View {
-        statusSection
-        Divider()
-        controlsSection
-        Divider()
-        navigationSection
-        Divider()
-        Button("Quit ContextD") {
-            NSApplication.shared.terminate(nil)
-        }
-        .keyboardShortcut("q")
-    }
+        VStack(spacing: 0) {
+            StatusHeaderView(
+                state: captureEngine.state,
+                isRunning: captureEngine.isRunning
+            )
+            .padding(.horizontal, 16)
+            .padding(.top, 14)
+            .padding(.bottom, 10)
 
-    @ViewBuilder
-    private var statusSection: some View {
-        let statusText = isRunning
-            ? "Capturing (\(captureCount))"
-            : "Paused"
-        Text(statusText)
-            .font(.caption)
-            .onAppear {
-                snapshotState()
+            Divider()
+                .padding(.horizontal, 12)
+
+            StatsCardsView(
+                captureCount: captureCount24h,
+                summaryCount: summaryCount24h,
+                estimatedCost: estimatedCostToday
+            )
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+
+            IntervalIndicatorView(captureEngine: captureEngine)
+            .padding(.horizontal, 16)
+            .padding(.bottom, 10)
+
+            Divider()
+                .padding(.horizontal, 12)
+
+            RecentActivityView(captures: recentCaptures)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+
+            // Only show warning if captures are NOT flowing (real problem)
+            // Don't show if it's just the macOS 15 stale permission check
+            let capturesWorking = captureCount24h > 0
+            if lastError != nil || (!permissionManager.allPermissionsGranted && !capturesWorking) {
+                Divider()
+                    .padding(.horizontal, 12)
+                WarningBannerView(
+                    error: lastError,
+                    permissionsOK: permissionManager.allPermissionsGranted || capturesWorking
+                )
+                .padding(.horizontal, 16)
+                .padding(.vertical, 6)
             }
 
-        if let lastTime = lastCaptureTime {
-            Text("Last: \(lastTime.relativeString)")
-                .font(.caption)
-        }
+            Divider()
+                .padding(.horizontal, 12)
 
-        if let error = lastError {
-            Text("Error: \(error)")
-                .font(.caption)
-        }
+            ActionsView(
+                captureEngine: captureEngine,
+                onOpenEnrichment: onOpenEnrichment,
+                onOpenDebug: onOpenDebug
+            )
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
 
-        if let usage = summarizerUsage {
-            Text("Tokens 24h: \(formatTokens(usage.inputTokens)) in / \(formatTokens(usage.outputTokens)) out")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            Divider()
+                .padding(.horizontal, 12)
+
+            QuitButton()
+                .padding(.horizontal, 12)
+                .padding(.top, 4)
+                .padding(.bottom, 8)
+        }
+        .frame(width: 320)
+        .onAppear {
+            snapshotState()
         }
     }
 
-    @ViewBuilder
-    private var controlsSection: some View {
-        Button(isRunning ? "Pause Capture" : "Resume Capture") {
-            if captureEngine.isRunning {
-                captureEngine.stop()
-            } else {
-                captureEngine.start()
-            }
-            // Update local snapshot to reflect the toggle immediately.
-            isRunning = captureEngine.isRunning
-        }
+    // MARK: - Data Snapshot
 
-        Button("Enrich Prompt...") {
-            onOpenEnrichment()
-        }
-        .keyboardShortcut(" ", modifiers: [.command, .shift])
-    }
-
-    @State private var copiedAPIUrl = false
-
-    @ViewBuilder
-    private var navigationSection: some View {
-        if !permissionManager.allPermissionsGranted {
-            Text("Missing permissions")
-                .font(.caption)
-                .foregroundStyle(.orange)
-        }
-
-        if let server = ServiceContainer.shared.apiServer {
-            Button(copiedAPIUrl ? "Copied!" : "API Docs — 127.0.0.1:\(String(server.port))/docs") {
-                let url = "http://127.0.0.1:\(server.port)/docs"
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(url, forType: .string)
-                copiedAPIUrl = true
-                DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                    copiedAPIUrl = false
-                }
-            }
-        }
-
-        SettingsLink {
-            Text("Settings...")
-        }
-        .keyboardShortcut(",")
-
-        Button("Database Debug...") {
-            onOpenDebug()
-        }
-        .keyboardShortcut("d", modifiers: [.command, .option])
-    }
-
-    /// Capture a one-time snapshot of the engine state and token usage.
+    /// Capture a fresh snapshot of stats each time the menu opens.
     private func snapshotState() {
-        guard !hasAppeared else { return }
-        hasAppeared = true
-        isRunning = captureEngine.isRunning
-        captureCount = captureEngine.captureCount
-        lastCaptureTime = captureEngine.lastCaptureTime
         lastError = captureEngine.lastError
-        if let storage = storageManager {
-            summarizerUsage = try? storage.tokenUsageTotals(caller: "summarizer")
-        }
-    }
 
-    private func formatTokens(_ value: Int64) -> String {
-        switch value {
-        case 0..<1_000:
-            return "\(value)"
-        case 1_000..<1_000_000:
-            return String(format: "%.1fk", Double(value) / 1_000)
-        default:
-            return String(format: "%.2fM", Double(value) / 1_000_000)
+        guard let storage = storageManager else { return }
+
+        captureCount24h = (try? storage.captureCount24h()) ?? 0
+        summaryCount24h = (try? storage.summaryCount24h()) ?? 0
+        recentCaptures = (try? storage.recentCaptures(limit: 3)) ?? []
+
+        // Estimate cost from token usage (Haiku pricing approximation)
+        if let usage = try? storage.totalTokenUsage24h() {
+            // Approximate pricing: $0.25/Mtok input, $1.25/Mtok output (Haiku 4.5)
+            let inputCost = usage.inputMtok * 0.25
+            let outputCost = usage.outputMtok * 1.25
+            estimatedCostToday = inputCost + outputCost
         }
     }
 }

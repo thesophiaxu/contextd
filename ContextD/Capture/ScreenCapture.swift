@@ -2,8 +2,13 @@ import Foundation
 import CoreGraphics
 
 /// Captures single-frame screenshots of the main display using CGDisplayCreateImage.
-/// Uses CoreGraphics directly — no ScreenCaptureKit involvement, so no recording
+/// Uses CoreGraphics directly, not ScreenCaptureKit, so there is no recording
 /// indicator and no app-visible screenshot notifications.
+///
+/// Screen sharing coexistence: CGDisplayCreateImage is a read-only,
+/// non-exclusive API. It does NOT interfere with Zoom, Teams, FaceTime,
+/// or any other app's ScreenCaptureKit-based screen sharing sessions.
+/// Both can run simultaneously without conflict.
 final class ScreenCapture: Sendable {
     private let logger = DualLogger(category: "ScreenCapture")
 
@@ -47,7 +52,7 @@ final class ScreenCapture: Sendable {
             return image
         }
 
-        context.interpolationQuality = .high
+        context.interpolationQuality = .medium
         context.draw(image, in: CGRect(x: 0, y: 0, width: newWidth, height: newHeight))
 
         guard let scaled = context.makeImage() else {

@@ -39,7 +39,7 @@ struct DiffResult: Sendable {
 
 /// Pixel-level tile diff engine. Compares two CGImages using a 32x32 tile grid
 /// to detect which portions of the screen changed between captures.
-final class ImageDiffer: Sendable {
+final class ImageDiffer {
     /// Size of each comparison tile in pixels.
     let tileSize: Int = 32
 
@@ -52,7 +52,17 @@ final class ImageDiffer: Sendable {
     let noiseThreshold: Double = 10.0 / 255.0
 
     /// Fraction of tiles that must change to trigger a keyframe.
-    nonisolated(unsafe) var significantChangeThreshold: Double = 0.50
+    let significantChangeThreshold: Double = 0.50
+
+    /// Reusable pixel buffers to avoid per-call allocation.
+    private var previousBuffer: UnsafeMutablePointer<UInt8>?
+    private var currentBuffer: UnsafeMutablePointer<UInt8>?
+    private var bufferSize: Int = 0
+
+    deinit {
+        previousBuffer?.deallocate()
+        currentBuffer?.deallocate()
+    }
 
     /// Compare two screenshots. Returns diff result with changed regions.
     /// If images have different dimensions, returns 100% changed (force keyframe).
@@ -65,17 +75,28 @@ final class ImageDiffer: Sendable {
             return forceFullChange(image: current)
         }
 
-        // Render both images into consistent 32-bit BGRA format for pixel access
-        guard let currentPixels = renderToPixelBuffer(current),
-              let previousPixels = renderToPixelBuffer(previous) else {
+        // Render both images into consistent 32-bit BGRA format for pixel access.
+        // Reuse buffers if dimensions match to avoid per-call allocation.
+        let requiredSize = currentWidth * currentHeight * 4
+        if requiredSize != bufferSize {
+            previousBuffer?.deallocate()
+            currentBuffer?.deallocate()
+            previousBuffer = UnsafeMutablePointer<UInt8>.allocate(capacity: requiredSize)
+            currentBuffer = UnsafeMutablePointer<UInt8>.allocate(capacity: requiredSize)
+            bufferSize = requiredSize
+        }
+
+        guard let curBuf = currentBuffer, let prevBuf = previousBuffer else {
             return forceFullChange(image: current)
         }
 
-        // Ensure pixel buffers are freed when we're done
-        defer {
-            currentPixels.deallocate()
-            previousPixels.deallocate()
+        guard renderToPixelBuffer(current, into: curBuf, size: requiredSize),
+              renderToPixelBuffer(previous, into: prevBuf, size: requiredSize) else {
+            return forceFullChange(image: current)
         }
+
+        let currentPixels = curBuf
+        let previousPixels = prevBuf
 
         let cols = (currentWidth + tileSize - 1) / tileSize
         let rows = (currentHeight + tileSize - 1) / tileSize
@@ -152,19 +173,23 @@ final class ImageDiffer: Sendable {
 
     // MARK: - Pixel Buffer Rendering
 
-    /// Render a CGImage into a consistent 32-bit BGRA pixel buffer for comparison.
-    private func renderToPixelBuffer(_ image: CGImage) -> UnsafeMutablePointer<UInt8>? {
+    /// Render a CGImage into a pre-allocated 32-bit BGRA pixel buffer for comparison.
+    /// Returns true on success, false if the context could not be created.
+    private func renderToPixelBuffer(
+        _ image: CGImage,
+        into buffer: UnsafeMutablePointer<UInt8>,
+        size: Int
+    ) -> Bool {
         let width = image.width
         let height = image.height
         let bytesPerPixel = 4
         let bytesPerRow = width * bytesPerPixel
-        let totalBytes = bytesPerRow * height
 
-        let pixels = UnsafeMutablePointer<UInt8>.allocate(capacity: totalBytes)
+        guard bytesPerRow * height <= size else { return false }
 
         guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
               let context = CGContext(
-                data: pixels,
+                data: buffer,
                 width: width,
                 height: height,
                 bitsPerComponent: 8,
@@ -172,12 +197,11 @@ final class ImageDiffer: Sendable {
                 space: colorSpace,
                 bitmapInfo: CGBitmapInfo.byteOrder32Little.rawValue | CGImageAlphaInfo.premultipliedFirst.rawValue
               ) else {
-            pixels.deallocate()
-            return nil
+            return false
         }
 
         context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
-        return pixels
+        return true
     }
 
     // MARK: - Tile Comparison
@@ -203,100 +227,6 @@ final class ImageDiffer: Sendable {
             earlyExitThreshold: thresholdTotal
         )
         return totalDiff > thresholdTotal
-    }
-
-    /// SIMD-accelerated total BGR diff for a tile. Processes 4 pixels (16 bytes) per
-    /// iteration via `SIMD16<UInt8>`, with scalar cleanup for remainder pixels.
-    /// Supports optional early exit when `earlyExitThreshold` is exceeded.
-    /// Returns the raw sum of per-channel absolute differences (BGR only, alpha skipped).
-    func tileDiffSIMD(
-        currentPixels: UnsafeMutablePointer<UInt8>,
-        previousPixels: UnsafeMutablePointer<UInt8>,
-        imageWidth: Int,
-        tileX: Int, tileY: Int,
-        tileW: Int, tileH: Int,
-        earlyExitThreshold: UInt64 = .max
-    ) -> UInt64 {
-        let bytesPerPixel = 4
-        let bytesPerRow = imageWidth * bytesPerPixel
-        var totalDiff: UInt64 = 0
-
-        let simdStride = 16 // bytes per SIMD vector = 4 pixels
-        let rowBytes = tileW * bytesPerPixel
-        let simdChunks = rowBytes / simdStride
-        let remainderStart = simdChunks * simdStride
-
-        for y in tileY..<(tileY + tileH) {
-            let rowBase = y * bytesPerRow + tileX * bytesPerPixel
-
-            // --- SIMD path: 4 pixels (16 bytes) per iteration ---
-            var chunkOffset = rowBase
-            for _ in 0..<simdChunks {
-                let cur = UnsafeRawPointer(currentPixels + chunkOffset)
-                    .loadUnaligned(as: SIMD16<UInt8>.self)
-                let prev = UnsafeRawPointer(previousPixels + chunkOffset)
-                    .loadUnaligned(as: SIMD16<UInt8>.self)
-
-                // Unsigned absolute difference per lane: max(a,b) - min(a,b)
-                let maxVal = cur.replacing(with: prev, where: cur .< prev)
-                let minVal = cur.replacing(with: prev, where: cur .> prev)
-                let d = maxVal &- minVal
-
-                // Sum BGR channels only (skip alpha at indices 3, 7, 11, 15).
-                let p0 = UInt64(d[0]) &+ UInt64(d[1]) &+ UInt64(d[2])
-                let p1 = UInt64(d[4]) &+ UInt64(d[5]) &+ UInt64(d[6])
-                let p2 = UInt64(d[8]) &+ UInt64(d[9]) &+ UInt64(d[10])
-                let p3 = UInt64(d[12]) &+ UInt64(d[13]) &+ UInt64(d[14])
-
-                totalDiff &+= p0 &+ p1 &+ p2 &+ p3
-                chunkOffset += simdStride
-            }
-
-            // --- Scalar remainder for pixels that don't fill a SIMD vector ---
-            var offset = rowBase + remainderStart
-            let rowEnd = rowBase + rowBytes
-            while offset < rowEnd {
-                let diffB = abs(Int(currentPixels[offset]) - Int(previousPixels[offset]))
-                let diffG = abs(Int(currentPixels[offset + 1]) - Int(previousPixels[offset + 1]))
-                let diffR = abs(Int(currentPixels[offset + 2]) - Int(previousPixels[offset + 2]))
-                totalDiff &+= UInt64(diffB + diffG + diffR)
-                offset += bytesPerPixel
-            }
-
-            // Early exit if we've already exceeded the threshold.
-            if totalDiff > earlyExitThreshold {
-                return totalDiff
-            }
-        }
-
-        return totalDiff
-    }
-
-    /// Scalar reference implementation of tile diff (for testing/benchmarking).
-    /// Returns the same raw BGR diff total as `tileDiffSIMD` but using a simple loop.
-    func tileDiffScalar(
-        currentPixels: UnsafeMutablePointer<UInt8>,
-        previousPixels: UnsafeMutablePointer<UInt8>,
-        imageWidth: Int,
-        tileX: Int, tileY: Int,
-        tileW: Int, tileH: Int
-    ) -> UInt64 {
-        let bytesPerPixel = 4
-        let bytesPerRow = imageWidth * bytesPerPixel
-        var totalDiff: UInt64 = 0
-
-        for y in tileY..<(tileY + tileH) {
-            let rowOffset = y * bytesPerRow + tileX * bytesPerPixel
-            for x in 0..<tileW {
-                let offset = rowOffset + x * bytesPerPixel
-                let diffB = abs(Int(currentPixels[offset]) - Int(previousPixels[offset]))
-                let diffG = abs(Int(currentPixels[offset + 1]) - Int(previousPixels[offset + 1]))
-                let diffR = abs(Int(currentPixels[offset + 2]) - Int(previousPixels[offset + 2]))
-                totalDiff += UInt64(diffB + diffG + diffR)
-            }
-        }
-
-        return totalDiff
     }
 
     // MARK: - Tile Merging
@@ -327,8 +257,10 @@ final class ImageDiffer: Sendable {
             var queue = [(tile.row, tile.col)]
             visited[tile.row][tile.col] = true
 
-            while !queue.isEmpty {
-                let (r, c) = queue.removeFirst()
+            var queueIndex = 0
+            while queueIndex < queue.count {
+                let (r, c) = queue[queueIndex]
+                queueIndex += 1
                 minRow = min(minRow, r)
                 maxRow = max(maxRow, r)
                 minCol = min(minCol, c)

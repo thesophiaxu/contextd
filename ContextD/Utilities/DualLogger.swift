@@ -15,12 +15,12 @@ struct DualLogger: Sendable {
 
     private static let subsystem = "com.contextd.app"
 
-    /// Date formatter for stdout timestamps. Uses a fixed format to avoid locale issues.
-    private static let timestampFormatter: DateFormatter = {
-        let f = DateFormatter()
-        f.dateFormat = "HH:mm:ss.SSS"
-        return f
-    }()
+    /// Thread-safe timestamp format for stdout. Uses Date.FormatStyle instead of DateFormatter.
+    private static let timestampStyle: Date.FormatStyle = .dateTime
+        .hour(.twoDigits(amPM: .omitted))
+        .minute(.twoDigits)
+        .second(.twoDigits)
+        .secondFraction(.fractional(3))
 
     init(subsystem: String = DualLogger.subsystem, category: String) {
         self.logger = Logger(subsystem: subsystem, category: category)
@@ -53,7 +53,7 @@ struct DualLogger: Sendable {
     }
 
     private func printToStdout(level: String, message: String) {
-        let ts = DualLogger.timestampFormatter.string(from: Date())
+        let ts = Date.now.formatted(DualLogger.timestampStyle)
         print("[\(ts)] [\(level)] [\(category)] \(message)")
     }
 }

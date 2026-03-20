@@ -2,50 +2,82 @@ import SwiftUI
 
 /// Settings window for ContextD configuration.
 struct SettingsView: View {
+
+    // MARK: - Defaults
+
+    /// Single source of truth for all default values. Used by both declarations and reset functions.
+    enum Defaults {
+        static let summarizationModel = "anthropic/claude-haiku-4-5"
+        static let enrichmentPass1Model = "anthropic/claude-haiku-4-5"
+        static let enrichmentPass2Model = "anthropic/claude-sonnet-4-6"
+        static let captureInterval: Double = 2.0
+        static let maxKeyframeInterval: Double = 60
+        static let keyframeChangeThreshold: Double = 0.50
+        static let chunkDuration: Double = 300
+        static let pollInterval: Double = 60
+        static let minAge: Double = 300
+        static let apiServerEnabled = true
+        static let apiServerPort = 21890
+        static let retentionDays = 7
+        static let summarizationMaxTokens = 1024
+        static let enrichmentPass1MaxTokens = 1024
+        static let enrichmentPass2MaxTokens = 2048
+        static let maxSummariesForPass1 = 30
+        static let maxCapturesForPass2 = 50
+        static let maxSamplesPerChunk = 10
+        static let enrichmentMaxKeyframes = 10
+        static let enrichmentMaxDeltasPerKeyframe = 5
+        static let enrichmentMaxKeyframeTextLength = 3000
+        static let enrichmentMaxDeltaTextLength = 500
+        static let summarizationMaxDeltasPerKeyframe = 3
+        static let summarizationMaxKeyframeTextLength = 2000
+        static let summarizationMaxDeltaTextLength = 300
+    }
+
     // API Settings
     @State private var apiKey: String = ""
     @State private var hasApiKey: Bool = false
-    @State private var summarizationModel: String = "anthropic/claude-haiku-4-5"
-    @State private var enrichmentPass1Model: String = "anthropic/claude-haiku-4-5"
-    @State private var enrichmentPass2Model: String = "anthropic/claude-sonnet-4-6"
+    @AppStorage("summarizationModel") private var summarizationModel: String = Defaults.summarizationModel
+    @AppStorage("enrichmentPass1Model") private var enrichmentPass1Model: String = Defaults.enrichmentPass1Model
+    @AppStorage("enrichmentPass2Model") private var enrichmentPass2Model: String = Defaults.enrichmentPass2Model
 
     // Capture Settings
-    @AppStorage("captureInterval") private var captureInterval: Double = 2.0
-    @AppStorage("maxKeyframeInterval") private var maxKeyframeInterval: Double = 60
-    @AppStorage("keyframeChangeThreshold") private var keyframeChangeThreshold: Double = 0.50
+    @AppStorage("captureInterval") private var captureInterval: Double = Defaults.captureInterval
+    @AppStorage("maxKeyframeInterval") private var maxKeyframeInterval: Double = Defaults.maxKeyframeInterval
+    @AppStorage("keyframeChangeThreshold") private var keyframeChangeThreshold: Double = Defaults.keyframeChangeThreshold
 
     // Summarization Settings
-    @AppStorage("summarizationChunkDuration") private var chunkDuration: Double = 300
-    @AppStorage("summarizationPollInterval") private var pollInterval: Double = 60
-    @AppStorage("summarizationMinAge") private var minAge: Double = 300
+    @AppStorage("summarizationChunkDuration") private var chunkDuration: Double = Defaults.chunkDuration
+    @AppStorage("summarizationPollInterval") private var pollInterval: Double = Defaults.pollInterval
+    @AppStorage("summarizationMinAge") private var minAge: Double = Defaults.minAge
 
     // API Server Settings
-    @AppStorage("apiServerEnabled") private var apiServerEnabled: Bool = true
-    @AppStorage("apiServerPort") private var apiServerPort: Int = 21890
+    @AppStorage("apiServerEnabled") private var apiServerEnabled: Bool = Defaults.apiServerEnabled
+    @AppStorage("apiServerPort") private var apiServerPort: Int = Defaults.apiServerPort
 
     // Storage Settings
-    @AppStorage("retentionDays") private var retentionDays: Int = 7
+    @AppStorage("retentionDays") private var retentionDays: Int = Defaults.retentionDays
 
     // LLM Token Limits
-    @AppStorage("summarizationMaxTokens") private var summarizationMaxTokens: Int = 1024
-    @AppStorage("enrichmentPass1MaxTokens") private var enrichmentPass1MaxTokens: Int = 1024
-    @AppStorage("enrichmentPass2MaxTokens") private var enrichmentPass2MaxTokens: Int = 2048
+    @AppStorage("summarizationMaxTokens") private var summarizationMaxTokens: Int = Defaults.summarizationMaxTokens
+    @AppStorage("enrichmentPass1MaxTokens") private var enrichmentPass1MaxTokens: Int = Defaults.enrichmentPass1MaxTokens
+    @AppStorage("enrichmentPass2MaxTokens") private var enrichmentPass2MaxTokens: Int = Defaults.enrichmentPass2MaxTokens
 
     // Context Size Limits
-    @AppStorage("maxSummariesForPass1") private var maxSummariesForPass1: Int = 30
-    @AppStorage("maxCapturesForPass2") private var maxCapturesForPass2: Int = 50
-    @AppStorage("maxSamplesPerChunk") private var maxSamplesPerChunk: Int = 10
+    @AppStorage("maxSummariesForPass1") private var maxSummariesForPass1: Int = Defaults.maxSummariesForPass1
+    @AppStorage("maxCapturesForPass2") private var maxCapturesForPass2: Int = Defaults.maxCapturesForPass2
+    @AppStorage("maxSamplesPerChunk") private var maxSamplesPerChunk: Int = Defaults.maxSamplesPerChunk
 
     // Capture Formatting Limits (Enrichment)
-    @AppStorage("enrichmentMaxKeyframes") private var enrichmentMaxKeyframes: Int = 10
-    @AppStorage("enrichmentMaxDeltasPerKeyframe") private var enrichmentMaxDeltasPerKeyframe: Int = 5
-    @AppStorage("enrichmentMaxKeyframeTextLength") private var enrichmentMaxKeyframeTextLength: Int = 3000
-    @AppStorage("enrichmentMaxDeltaTextLength") private var enrichmentMaxDeltaTextLength: Int = 500
+    @AppStorage("enrichmentMaxKeyframes") private var enrichmentMaxKeyframes: Int = Defaults.enrichmentMaxKeyframes
+    @AppStorage("enrichmentMaxDeltasPerKeyframe") private var enrichmentMaxDeltasPerKeyframe: Int = Defaults.enrichmentMaxDeltasPerKeyframe
+    @AppStorage("enrichmentMaxKeyframeTextLength") private var enrichmentMaxKeyframeTextLength: Int = Defaults.enrichmentMaxKeyframeTextLength
+    @AppStorage("enrichmentMaxDeltaTextLength") private var enrichmentMaxDeltaTextLength: Int = Defaults.enrichmentMaxDeltaTextLength
 
     // Capture Formatting Limits (Summarization)
-    @AppStorage("summarizationMaxDeltasPerKeyframe") private var summarizationMaxDeltasPerKeyframe: Int = 3
-    @AppStorage("summarizationMaxKeyframeTextLength") private var summarizationMaxKeyframeTextLength: Int = 2000
-    @AppStorage("summarizationMaxDeltaTextLength") private var summarizationMaxDeltaTextLength: Int = 300
+    @AppStorage("summarizationMaxDeltasPerKeyframe") private var summarizationMaxDeltasPerKeyframe: Int = Defaults.summarizationMaxDeltasPerKeyframe
+    @AppStorage("summarizationMaxKeyframeTextLength") private var summarizationMaxKeyframeTextLength: Int = Defaults.summarizationMaxKeyframeTextLength
+    @AppStorage("summarizationMaxDeltaTextLength") private var summarizationMaxDeltaTextLength: Int = Defaults.summarizationMaxDeltaTextLength
 
     // Prompt Templates
     @AppStorage(PromptTemplates.SettingsKey.summarizationSystem.rawValue)
@@ -58,10 +90,12 @@ struct SettingsView: View {
     private var customPass2System: String = ""
 
     @State private var showApiKeySaved: Bool = false
+    @State private var saveError: String?
     @State private var selectedTab: SettingsTab = .general
 
     enum SettingsTab: String, CaseIterable, Identifiable {
         case general = "General"
+        case privacy = "Privacy"
         case models = "Models"
         case limits = "Limits"
         case prompts = "Prompts"
@@ -75,6 +109,10 @@ struct SettingsView: View {
             generalTab
                 .tabItem { Label("General", systemImage: "gear") }
                 .tag(SettingsTab.general)
+
+            SettingsPrivacyTab()
+                .tabItem { Label("Privacy", systemImage: "eye.slash") }
+                .tag(SettingsTab.privacy)
 
             modelsTab
                 .tabItem { Label("Models", systemImage: "cpu") }
@@ -112,6 +150,16 @@ struct SettingsView: View {
                         Text(showApiKeySaved ? "Saved!" : "Save")
                     }
                     .disabled(apiKey.isEmpty)
+                }
+
+                if let error = saveError {
+                    HStack {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.red)
+                        Text(error)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    }
                 }
 
                 if hasApiKey {
@@ -172,6 +220,9 @@ struct SettingsView: View {
                     TextField("Port", value: $apiServerPort, format: .number)
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 80)
+                        .onChange(of: apiServerPort) { _, newValue in
+                            apiServerPort = min(max(newValue, 1024), 65535)
+                        }
 
                     Button("Restart") {
                         ServiceContainer.shared.stopAPIServer()
@@ -301,19 +352,19 @@ struct SettingsView: View {
     }
 
     private func resetLimitsToDefaults() {
-        summarizationMaxTokens = 1024
-        enrichmentPass1MaxTokens = 1024
-        enrichmentPass2MaxTokens = 2048
-        maxSummariesForPass1 = 30
-        maxCapturesForPass2 = 50
-        maxSamplesPerChunk = 10
-        enrichmentMaxKeyframes = 10
-        enrichmentMaxDeltasPerKeyframe = 5
-        enrichmentMaxKeyframeTextLength = 3000
-        enrichmentMaxDeltaTextLength = 500
-        summarizationMaxDeltasPerKeyframe = 3
-        summarizationMaxKeyframeTextLength = 2000
-        summarizationMaxDeltaTextLength = 300
+        summarizationMaxTokens = Defaults.summarizationMaxTokens
+        enrichmentPass1MaxTokens = Defaults.enrichmentPass1MaxTokens
+        enrichmentPass2MaxTokens = Defaults.enrichmentPass2MaxTokens
+        maxSummariesForPass1 = Defaults.maxSummariesForPass1
+        maxCapturesForPass2 = Defaults.maxCapturesForPass2
+        maxSamplesPerChunk = Defaults.maxSamplesPerChunk
+        enrichmentMaxKeyframes = Defaults.enrichmentMaxKeyframes
+        enrichmentMaxDeltasPerKeyframe = Defaults.enrichmentMaxDeltasPerKeyframe
+        enrichmentMaxKeyframeTextLength = Defaults.enrichmentMaxKeyframeTextLength
+        enrichmentMaxDeltaTextLength = Defaults.enrichmentMaxDeltaTextLength
+        summarizationMaxDeltasPerKeyframe = Defaults.summarizationMaxDeltasPerKeyframe
+        summarizationMaxKeyframeTextLength = Defaults.summarizationMaxKeyframeTextLength
+        summarizationMaxDeltaTextLength = Defaults.summarizationMaxDeltaTextLength
     }
 
     // MARK: - Prompts Tab
@@ -404,12 +455,14 @@ struct SettingsView: View {
             try OpenRouterClient.saveAPIKey(apiKey)
             hasApiKey = true
             showApiKeySaved = true
+            saveError = nil
             apiKey = "" // Clear from memory
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+            Task {
+                try? await Task.sleep(for: .seconds(2))
                 showApiKeySaved = false
             }
         } catch {
-            // Show error - TODO: proper error handling
+            saveError = "Failed to save API key: \(error.localizedDescription)"
         }
     }
 }

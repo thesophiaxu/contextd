@@ -24,13 +24,17 @@ struct SummaryRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// JSON array of capture IDs covered by this summary
     var captureIds: String
 
+    /// TF-IDF vector stored as serialized Float BLOB.
+    /// Nullable: existing summaries are backfilled lazily on first search.
+    var embedding: Data?
+
     // MARK: - Table mapping
 
     static let databaseTableName = "summaries"
 
     enum Columns: String, ColumnExpression {
         case id, startTimestamp, endTimestamp, appNames
-        case summary, keyTopics, captureIds
+        case summary, keyTopics, captureIds, embedding
     }
 
     // MARK: - Record lifecycle
