@@ -100,6 +100,19 @@ final class StorageManager: Sendable {
         }
     }
 
+    /// Fetch unsummarized captures within a time range, ordered by timestamp descending.
+    func unsummarizedCaptures(from startDate: Date, to endDate: Date, limit: Int = 500) throws -> [CaptureRecord] {
+        try database.dbPool.read { db in
+            try CaptureRecord
+                .filter(CaptureRecord.Columns.isSummarized == false)
+                .filter(CaptureRecord.Columns.timestamp >= startDate.timeIntervalSince1970)
+                .filter(CaptureRecord.Columns.timestamp <= endDate.timeIntervalSince1970)
+                .order(CaptureRecord.Columns.timestamp.desc)
+                .limit(limit)
+                .fetchAll(db)
+        }
+    }
+
     /// Mark captures as summarized.
     func markCapturesAsSummarized(ids: [Int64]) throws {
         guard !ids.isEmpty else { return }
@@ -282,6 +295,43 @@ final class StorageManager: Sendable {
         }
 
         return groups
+    }
+
+    // MARK: - Token Usage
+
+    /// Insert a token usage record.
+    @discardableResult
+    func insertTokenUsage(_ record: TokenUsageRecord) throws -> TokenUsageRecord {
+        var record = record
+        try database.dbPool.write { db in
+            try record.insert(db)
+        }
+        return record
+    }
+
+    /// Get aggregated token usage for a caller within the last N seconds.
+    func tokenUsageTotals(caller: String, withinLast seconds: TimeInterval = 86400) throws -> TokenUsageTotals {
+        let cutoff = Date().timeIntervalSince1970 - seconds
+        return try database.dbPool.read { db in
+            let row = try Row.fetchOne(db, sql: """
+                SELECT COALESCE(SUM(inputTokens), 0) AS totalInput,
+                       COALESCE(SUM(outputTokens), 0) AS totalOutput
+                FROM token_usage
+                WHERE caller = ? AND timestamp >= ?
+                """, arguments: [caller, cutoff])
+            let totalInput = row?["totalInput"] as? Int64 ?? 0
+            let totalOutput = row?["totalOutput"] as? Int64 ?? 0
+            return TokenUsageTotals(inputTokens: totalInput, outputTokens: totalOutput)
+        }
+    }
+
+    /// Delete token usage records older than the given number of days.
+    func pruneOldTokenUsage(olderThanDays days: Int = 7) throws -> Int {
+        let cutoff = Date().timeIntervalSince1970 - Double(days * 86400)
+        return try database.dbPool.write { db in
+            try db.execute(sql: "DELETE FROM token_usage WHERE timestamp < ?", arguments: [cutoff])
+            return db.changesCount
+        }
     }
 
     // MARK: - Cleanup

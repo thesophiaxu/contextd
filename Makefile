@@ -17,7 +17,7 @@ RED    := \033[0;31m
 CYAN   := \033[0;36m
 RESET  := \033[0m
 
-.PHONY: help build release run clean resolve lint db-shell db-stats db-recent db-search \
+.PHONY: help build release run clean resolve lint test benchmark db-shell db-stats db-recent db-search \
         db-keyframes reset-permissions reset-db logs install uninstall check-permissions watch
 
 # ─────────────────────────────────────────
@@ -85,6 +85,16 @@ watch: ## Rebuild on file changes (requires fswatch: brew install fswatch)
 			echo "$(RED)Build failed$(RESET)"; \
 		fi; \
 	done
+
+test: ## Run unit tests
+	@echo "$(CYAN)Running tests...$(RESET)"
+	@swift test 2>&1
+	@echo "$(GREEN)Tests complete.$(RESET)"
+
+benchmark: ## Run ImageDiffer benchmarks (scalar vs SIMD)
+	@echo "$(CYAN)Running ImageDiffer benchmarks...$(RESET)"
+	@swift test --filter "ImageDifferTests/testBenchmark" 2>&1
+	@echo "$(GREEN)Benchmarks complete.$(RESET)"
 
 lint: ## Check for common issues (unused imports, formatting)
 	@echo "$(CYAN)Checking for issues...$(RESET)"

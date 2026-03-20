@@ -42,6 +42,7 @@ private struct MenuBarContent: View {
                 MenuBarView(
                     captureEngine: captureEngine,
                     permissionManager: permissionManager,
+                    storageManager: services.storageManager,
                     onOpenEnrichment: {
                         services.panelController?.toggle()
                     },

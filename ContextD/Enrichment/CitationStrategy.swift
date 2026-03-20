@@ -1,19 +1,20 @@
 import Foundation
 
-/// Two-pass LLM retrieval strategy for context enrichment.
+/// Citation-oriented enrichment strategy for the API endpoint.
 ///
-/// Pass 1: Search summaries (FTS5 + recency) -> LLM judges relevance
-/// Pass 2: Fetch detailed captures for relevant summaries -> LLM synthesizes footnotes
-final class TwoPassLLMStrategy: EnrichmentStrategy, @unchecked Sendable {
-    let name = "Two-Pass LLM"
-    let strategyDescription = "Uses FTS5 search + LLM relevance judging, then detailed capture analysis"
-
-    private let logger = DualLogger(category: "TwoPassLLM")
+/// Reuses the same two-pass retrieval pipeline as TwoPassLLMStrategy:
+///   Pass 1: FTS5 search summaries + recency -> LLM judges relevance
+///   Pass 2: Fetch detailed captures for relevant summaries -> LLM outputs JSON citations
+///
+/// The key difference: Pass 2 returns a JSON array of structured citations instead of
+/// markdown footnotes, making it suitable for programmatic consumption via the API.
+final class CitationStrategy: @unchecked Sendable {
+    private let logger = DualLogger(category: "CitationStrategy")
 
     /// Model for Pass 1 (cheap/fast, relevance judging).
     var pass1Model: String = "anthropic/claude-haiku-4-5"
 
-    /// Model for Pass 2 (can be more capable, context synthesis).
+    /// Model for Pass 2 (context synthesis into structured citations).
     var pass2Model: String = "anthropic/claude-sonnet-4-6"
 
     /// Maximum summaries to send to Pass 1.
@@ -25,35 +26,83 @@ final class TwoPassLLMStrategy: EnrichmentStrategy, @unchecked Sendable {
     /// Max response tokens for Pass 1 (relevance judging).
     var pass1MaxTokens: Int = 1024
 
-    /// Max response tokens for Pass 2 (context synthesis).
-    var pass2MaxTokens: Int = 2048
+    /// Max response tokens for Pass 2 (citation synthesis).
+    var pass2MaxTokens: Int = 4096
 
-    /// Capture formatting limits for enrichment.
+    /// Capture formatting limits.
     var maxKeyframes: Int = 10
     var maxDeltasPerKeyframe: Int = 5
     var maxKeyframeTextLength: Int = 3000
     var maxDeltaTextLength: Int = 500
 
-    func enrich(
-        query: String,
+    // MARK: - Citation-Specific Prompts
+
+    private let citationPass2System = """
+        You are a context retrieval system. Given a user's query and detailed screen \
+        captures from their recent computer activity, extract structured citations that \
+        are relevant to the query.
+
+        Rules:
+        - Only include genuinely relevant information
+        - Be concise but specific — include exact names, values, code snippets, etc.
+        - Order by relevance (most relevant first)
+        - Maximum 10 citations
+        - Each citation must include the timestamp, app name, and window title from the capture data
+
+        Respond ONLY with a JSON array (no markdown, no explanation). Example:
+        [
+          {
+            "timestamp": "2026-03-12T10:23:45Z",
+            "app_name": "Google Chrome",
+            "window_title": "Pull Request #482 - GitHub",
+            "relevant_text": "Refactored OAuth2 token refresh logic to handle concurrent requests...",
+            "relevance_explanation": "This PR review discussed the auth token changes the user is asking about",
+            "source": "capture"
+          }
+        ]
+
+        If nothing is relevant, respond with an empty array: []
+        """
+
+    private let citationPass2User = """
+        ## User's Query
+        {query}
+
+        ## Detailed Screen Activity
+        {captures}
+
+        Extract structured JSON citations with relevant context for the user's query.
+        """
+
+    // MARK: - Public API
+
+    /// Result of a citation query.
+    struct CitationResult: Sendable {
+        let citations: [Citation]
+        let summariesSearched: Int
+        let capturesExamined: Int
+        let processingTime: TimeInterval
+    }
+
+    /// Run the citation pipeline: retrieve relevant context and return structured citations.
+    func queryCitations(
+        text: String,
         timeRange: TimeRange,
         storageManager: StorageManager,
         llmClient: LLMClient
-    ) async throws -> EnrichedResult {
+    ) async throws -> CitationResult {
         let startTime = Date()
 
-        // --- Run both paths in parallel ---
-        // Path A: Normal 2-pass over summaries (Pass 1 relevance -> resolve to captures)
-        // Path B: Direct search over unsummarized captures (FTS + recency)
+        // --- Run both retrieval paths in parallel ---
         async let summaryCapturesResult = fetchCapturesViaSummaries(
-            query: query,
+            query: text,
             timeRange: timeRange,
             storageManager: storageManager,
             llmClient: llmClient
         )
 
         async let unsummarizedCapturesResult = fetchUnsummarizedCaptures(
-            query: query,
+            query: text,
             timeRange: timeRange,
             storageManager: storageManager
         )
@@ -65,7 +114,6 @@ final class TwoPassLLMStrategy: EnrichmentStrategy, @unchecked Sendable {
         var seen = Set<Int64>()
         var mergedCaptures: [CaptureRecord] = []
 
-        // Summary-path captures first (they passed relevance filtering)
         for capture in summaryPath.captures {
             if let id = capture.id, !seen.contains(id) {
                 seen.insert(id)
@@ -73,7 +121,6 @@ final class TwoPassLLMStrategy: EnrichmentStrategy, @unchecked Sendable {
             }
         }
 
-        // Then unsummarized captures
         for capture in unsummarizedPath {
             if let id = capture.id, !seen.contains(id) {
                 seen.insert(id)
@@ -81,58 +128,39 @@ final class TwoPassLLMStrategy: EnrichmentStrategy, @unchecked Sendable {
             }
         }
 
-        // Sort merged captures by timestamp descending for consistent ordering
         mergedCaptures.sort { $0.timestamp > $1.timestamp }
-
-        // Limit to maxCapturesForPass2
         let limitedCaptures = Array(mergedCaptures.prefix(maxCapturesForPass2))
 
-        // --- Pass 2: Synthesize footnotes from merged captures ---
-        let footnotes: String
+        // --- Pass 2: Synthesize structured citations ---
+        let citations: [Citation]
         let capturesExamined: Int
 
         if !limitedCaptures.isEmpty {
-            let result = try await pass2Synthesize(
-                query: query,
+            let result = try await pass2ExtractCitations(
+                query: text,
                 captures: limitedCaptures,
                 llmClient: llmClient
             )
-            footnotes = result.footnotes
+            citations = result.citations
             capturesExamined = result.capturesExamined
         } else {
-            footnotes = ""
+            citations = []
             capturesExamined = 0
         }
 
-        // --- Build final result ---
-        let enrichedPrompt: String
-        if footnotes.isEmpty {
-            enrichedPrompt = query + "\n\n_(No relevant context found from recent activity.)_"
-        } else {
-            enrichedPrompt = query + "\n\n---\n## Context References\n\n" + footnotes
-        }
+        let processingTime = Date().timeIntervalSince(startTime)
 
-        let metadata = EnrichmentMetadata(
-            strategy: name,
-            timeRange: timeRange,
+        logger.info("Citation query: \(summaryPath.captures.count) from summaries, \(unsummarizedPath.count) unsummarized, \(limitedCaptures.count) merged, \(citations.count) citations in \(String(format: "%.1f", processingTime))s")
+
+        return CitationResult(
+            citations: citations,
             summariesSearched: summaryPath.summariesSearched,
             capturesExamined: capturesExamined,
-            processingTime: Date().timeIntervalSince(startTime),
-            pass1Model: pass1Model,
-            pass2Model: pass2Model
-        )
-
-        logger.info("Enrichment: \(summaryPath.captures.count) captures from summaries, \(unsummarizedPath.count) unsummarized, \(limitedCaptures.count) merged for Pass 2")
-
-        return EnrichedResult(
-            originalPrompt: query,
-            enrichedPrompt: enrichedPrompt,
-            references: [], // TODO: parse individual references from footnotes
-            metadata: metadata
+            processingTime: processingTime
         )
     }
 
-    // MARK: - Pass 1: Relevance Judging
+    // MARK: - Pass 1: Relevance Judging (identical to TwoPassLLMStrategy)
 
     private func pass1RelevanceJudging(
         query: String,
@@ -140,14 +168,11 @@ final class TwoPassLLMStrategy: EnrichmentStrategy, @unchecked Sendable {
         storageManager: StorageManager,
         llmClient: LLMClient
     ) async throws -> (relevantIds: [Int64], allSummaries: [SummaryRecord]) {
-        // Gather summaries: FTS search + recent
         var summaries: [SummaryRecord] = []
 
-        // FTS search
         let ftsResults = try storageManager.searchSummaries(query: query, limit: maxSummariesForPass1 / 2)
         summaries.append(contentsOf: ftsResults)
 
-        // Recent summaries (within time range)
         let recentResults = try storageManager.summaries(
             from: timeRange.start,
             to: timeRange.end,
@@ -155,7 +180,6 @@ final class TwoPassLLMStrategy: EnrichmentStrategy, @unchecked Sendable {
         )
         summaries.append(contentsOf: recentResults)
 
-        // Deduplicate by ID
         var seen = Set<Int64>()
         summaries = summaries.filter { summary in
             guard let id = summary.id, !seen.contains(id) else { return false }
@@ -168,7 +192,6 @@ final class TwoPassLLMStrategy: EnrichmentStrategy, @unchecked Sendable {
             return ([], [])
         }
 
-        // Format summaries for the LLM
         let dateFormatter = DateFormatter()
         dateFormatter.dateFormat = "HH:mm:ss"
 
@@ -199,21 +222,19 @@ final class TwoPassLLMStrategy: EnrichmentStrategy, @unchecked Sendable {
             temperature: 0.0
         )
 
-        // Parse relevant IDs from response
         let relevantIds = parsePass1Response(response, validIds: Set(summaries.compactMap(\.id)))
 
         logger.info("Pass 1: \(summaries.count) summaries searched, \(relevantIds.count) relevant")
         return (relevantIds, summaries)
     }
 
-    // MARK: - Path A: Fetch captures via summaries (Pass 1 relevance -> resolve to captures)
+    // MARK: - Path A: Fetch captures via summaries
 
     private struct SummaryPathResult {
         let captures: [CaptureRecord]
         let summariesSearched: Int
     }
 
-    /// Run Pass 1 relevance judging, then resolve relevant summary IDs to their underlying captures.
     private func fetchCapturesViaSummaries(
         query: String,
         timeRange: TimeRange,
@@ -231,7 +252,6 @@ final class TwoPassLLMStrategy: EnrichmentStrategy, @unchecked Sendable {
             return SummaryPathResult(captures: [], summariesSearched: allSummaries.count)
         }
 
-        // Resolve summary IDs to their underlying capture IDs
         var allCaptureIds: [Int64] = []
         let allDBSummaries = try storageManager.summaries(
             from: Date.distantPast,
@@ -249,26 +269,22 @@ final class TwoPassLLMStrategy: EnrichmentStrategy, @unchecked Sendable {
         return SummaryPathResult(captures: captures, summariesSearched: allSummaries.count)
     }
 
-    // MARK: - Path B: Fetch unsummarized captures directly
+    // MARK: - Path B: Fetch unsummarized captures
 
-    /// Search unsummarized captures via FTS + recency within the time range.
     private func fetchUnsummarizedCaptures(
         query: String,
         timeRange: TimeRange,
         storageManager: StorageManager
     ) throws -> [CaptureRecord] {
-        // FTS search over all captures (may include unsummarized ones)
         let ftsResults = try storageManager.searchCaptures(query: query, limit: maxCapturesForPass2 / 2)
             .filter { !$0.isSummarized }
 
-        // Recent unsummarized captures within the time range
         let recentUnsummarized = try storageManager.unsummarizedCaptures(
             from: timeRange.start,
             to: timeRange.end,
             limit: maxCapturesForPass2 / 2
         )
 
-        // Merge and deduplicate
         var seen = Set<Int64>()
         let merged = (ftsResults + recentUnsummarized).filter { capture in
             guard let id = capture.id, !seen.contains(id) else { return false }
@@ -280,19 +296,18 @@ final class TwoPassLLMStrategy: EnrichmentStrategy, @unchecked Sendable {
         return merged
     }
 
-    // MARK: - Pass 2: Context Synthesis
+    // MARK: - Pass 2: Citation Extraction
 
-    private struct Pass2Result {
-        let footnotes: String
+    private struct Pass2CitationResult {
+        let citations: [Citation]
         let capturesExamined: Int
     }
 
-    /// Run the Pass 2 LLM call to synthesize footnotes from a set of captures.
-    private func pass2Synthesize(
+    private func pass2ExtractCitations(
         query: String,
         captures: [CaptureRecord],
         llmClient: LLMClient
-    ) async throws -> Pass2Result {
+    ) async throws -> Pass2CitationResult {
         let capturesText = CaptureFormatter.formatHierarchical(
             captures: captures,
             maxKeyframes: maxKeyframes,
@@ -302,57 +317,51 @@ final class TwoPassLLMStrategy: EnrichmentStrategy, @unchecked Sendable {
         )
 
         let userPrompt = PromptTemplates.render(
-            PromptTemplates.template(for: .enrichmentPass2User),
+            citationPass2User,
             values: [
                 "query": query,
                 "captures": capturesText,
             ]
         )
 
-        let systemPrompt = PromptTemplates.template(for: .enrichmentPass2System)
-
-        let footnotes = try await llmClient.complete(
+        let response = try await llmClient.complete(
             messages: [LLMMessage(role: "user", content: userPrompt)],
             model: pass2Model,
             maxTokens: pass2MaxTokens,
-            systemPrompt: systemPrompt,
+            systemPrompt: citationPass2System,
             temperature: 0.0
         )
 
-        logger.info("Pass 2: Examined \(captures.count) captures, generated footnotes")
-        return Pass2Result(footnotes: footnotes, capturesExamined: captures.count)
+        let citations = parseCitationResponse(response)
+        logger.info("Pass 2: Examined \(captures.count) captures, extracted \(citations.count) citations")
+        return Pass2CitationResult(citations: citations, capturesExamined: captures.count)
     }
 
     // MARK: - Response Parsing
 
-    /// Strip markdown code fences (```json ... ``` or ``` ... ```) from LLM output.
     private func stripCodeFences(_ text: String) -> String {
         var s = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        // Remove opening fence: ```json or ```
         if s.hasPrefix("```") {
             if let endOfFirstLine = s.firstIndex(of: "\n") {
                 s = String(s[s.index(after: endOfFirstLine)...])
             }
         }
-        // Remove closing fence
         if s.hasSuffix("```") {
             s = String(s.dropLast(3))
         }
         return s.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    /// Parse Pass 1 JSON response to extract relevant summary IDs.
     private func parsePass1Response(_ response: String, validIds: Set<Int64>) -> [Int64] {
         let cleaned = stripCodeFences(response)
 
         guard let data = cleaned.data(using: .utf8),
               let json = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
-            logger.warning("Failed to parse Pass 1 response as JSON array. Raw response:\n\(response)")
+            logger.warning("Failed to parse Pass 1 response as JSON array")
             return []
         }
 
         return json.compactMap { item -> Int64? in
-            // JSONSerialization decodes JSON integers as NSNumber — try Int, Int64, Double
             if let intId = item["id"] as? Int {
                 let id64 = Int64(intId)
                 return validIds.contains(id64) ? id64 : nil
@@ -365,6 +374,43 @@ final class TwoPassLLMStrategy: EnrichmentStrategy, @unchecked Sendable {
                 return validIds.contains(id64) ? id64 : nil
             }
             return nil
+        }
+    }
+
+    /// Parse the Pass 2 JSON response into Citation objects.
+    private func parseCitationResponse(_ response: String) -> [Citation] {
+        let cleaned = stripCodeFences(response)
+
+        guard let data = cleaned.data(using: .utf8) else {
+            logger.warning("Failed to encode citation response as UTF-8")
+            return []
+        }
+
+        // Try decoding directly as [Citation]
+        if let citations = try? JSONDecoder().decode([Citation].self, from: data) {
+            return citations
+        }
+
+        // Fallback: parse as [[String: Any]] and extract manually
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
+            logger.warning("Failed to parse citation response as JSON array. Raw:\n\(response.prefix(500))")
+            return []
+        }
+
+        return json.compactMap { item -> Citation? in
+            guard let relevantText = item["relevant_text"] as? String,
+                  let explanation = item["relevance_explanation"] as? String else {
+                return nil
+            }
+
+            return Citation(
+                timestamp: item["timestamp"] as? String ?? ISO8601DateFormatter().string(from: Date()),
+                app_name: item["app_name"] as? String ?? "Unknown",
+                window_title: item["window_title"] as? String,
+                relevant_text: relevantText,
+                relevance_explanation: explanation,
+                source: item["source"] as? String ?? "capture"
+            )
         }
     }
 }

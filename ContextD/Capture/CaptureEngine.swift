@@ -105,7 +105,7 @@ final class CaptureEngine: ObservableObject {
             let metadata = accessibilityReader.readCurrentState()
 
             // Step 2: Capture screenshot
-            guard let image = try await screenCapture.captureMainDisplay() else {
+            guard let image = try screenCapture.captureMainDisplay() else {
                 logger.warning("Screenshot capture returned nil")
                 return
             }

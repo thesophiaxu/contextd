@@ -24,10 +24,22 @@ actor SummarizationEngine {
     var minimumChunkDuration: TimeInterval = 15
 
     /// The model to use for summarization (cheap/fast).
-    var model: String = "claude-haiku-4-5"
+    var model: String = "anthropic/claude-haiku-4-5"
 
     /// Maximum OCR text samples to include per chunk (to stay within token limits).
     var maxSamplesPerChunk: Int = 10
+
+    /// Max response tokens for summarization LLM calls.
+    var maxTokens: Int = 1024
+
+    /// Max deltas per keyframe in formatted output.
+    var maxDeltasPerKeyframe: Int = 3
+
+    /// Max keyframe text length in formatted output.
+    var maxKeyframeTextLength: Int = 2000
+
+    /// Max delta text length in formatted output.
+    var maxDeltaTextLength: Int = 300
 
     private var isRunning = false
     private var task: Task<Void, Never>?
@@ -36,6 +48,14 @@ actor SummarizationEngine {
         self.storageManager = storageManager
         self.llmClient = llmClient
     }
+
+    // MARK: - Settings Setters (for applying UserDefaults from outside the actor)
+
+    func setMaxTokens(_ value: Int) { maxTokens = value }
+    func setMaxSamplesPerChunk(_ value: Int) { maxSamplesPerChunk = value }
+    func setMaxDeltasPerKeyframe(_ value: Int) { maxDeltasPerKeyframe = value }
+    func setMaxKeyframeTextLength(_ value: Int) { maxKeyframeTextLength = value }
+    func setMaxDeltaTextLength(_ value: Int) { maxDeltaTextLength = value }
 
     /// Start the background summarization loop.
     func start() {
@@ -110,9 +130,9 @@ actor SummarizationEngine {
         let ocrSamples = CaptureFormatter.formatHierarchical(
             captures: chunk.captures,
             maxKeyframes: maxSamplesPerChunk,
-            maxDeltasPerKeyframe: 3,
-            maxKeyframeTextLength: 2000,
-            maxDeltaTextLength: 300
+            maxDeltasPerKeyframe: maxDeltasPerKeyframe,
+            maxKeyframeTextLength: maxKeyframeTextLength,
+            maxDeltaTextLength: maxDeltaTextLength
         )
 
         let dateFormatter = DateFormatter()
@@ -138,16 +158,30 @@ actor SummarizationEngine {
         let systemPrompt = PromptTemplates.template(for: .summarizationSystem)
 
         // Call LLM
-        let response = try await llmClient.complete(
+        let llmResponse = try await llmClient.completeWithUsage(
             messages: [LLMMessage(role: "user", content: userPrompt)],
             model: model,
-            maxTokens: 1024,
+            maxTokens: maxTokens,
             systemPrompt: systemPrompt,
             temperature: 0.0
         )
 
+        // Record token usage
+        if let usage = llmResponse.usage {
+            let usageRecord = TokenUsageRecord(
+                id: nil,
+                timestamp: Date().timeIntervalSince1970,
+                caller: "summarizer",
+                model: model,
+                inputTokens: usage.inputTokens,
+                outputTokens: usage.outputTokens
+            )
+            _ = try? storageManager.insertTokenUsage(usageRecord)
+            logger.debug("Summarizer tokens: in=\(usage.inputTokens) out=\(usage.outputTokens)")
+        }
+
         // Parse JSON response
-        let (summary, keyTopics) = parseSummarizationResponse(response)
+        let (summary, keyTopics) = parseSummarizationResponse(llmResponse.text)
 
         // Store the summary
         let appNamesJSON = try String(data: JSONEncoder().encode(chunk.appNames), encoding: .utf8) ?? "[]"

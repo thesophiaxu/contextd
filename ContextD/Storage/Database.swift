@@ -161,6 +161,22 @@ final class AppDatabase: Sendable {
                 """)
         }
 
+        migrator.registerMigration("v2_createTokenUsage") { db in
+            try db.create(table: "token_usage") { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("timestamp", .double).notNull()
+                t.column("caller", .text).notNull()
+                t.column("model", .text).notNull()
+                t.column("inputTokens", .integer).notNull()
+                t.column("outputTokens", .integer).notNull()
+            }
+
+            try db.create(index: "idx_token_usage_timestamp", on: "token_usage",
+                          columns: ["timestamp"])
+            try db.create(index: "idx_token_usage_caller", on: "token_usage",
+                          columns: ["caller"])
+        }
+
         return migrator
     }
 }

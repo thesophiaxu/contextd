@@ -37,11 +37,11 @@ struct DiffResult: Sendable {
     let isSignificantChange: Bool
 }
 
-/// Pixel-level tile diff engine. Compares two CGImages using a 64x64 tile grid
+/// Pixel-level tile diff engine. Compares two CGImages using a 32x32 tile grid
 /// to detect which portions of the screen changed between captures.
 final class ImageDiffer: Sendable {
     /// Size of each comparison tile in pixels.
-    let tileSize: Int = 64
+    let tileSize: Int = 32
 
     /// Padding added around changed tile groups when cropping for OCR.
     let paddingPixels: Int = 32
@@ -183,7 +183,8 @@ final class ImageDiffer: Sendable {
     // MARK: - Tile Comparison
 
     /// Check if a single tile has changed beyond the noise threshold.
-    /// Computes mean absolute per-channel pixel difference for the tile.
+    /// Uses SIMD to process 4 pixels (16 bytes) at a time for the bulk of each row,
+    /// with a scalar fallback for any remainder pixels.
     private func isTileChanged(
         currentPixels: UnsafeMutablePointer<UInt8>,
         previousPixels: UnsafeMutablePointer<UInt8>,
@@ -191,18 +192,103 @@ final class ImageDiffer: Sendable {
         tileX: Int, tileY: Int,
         tileW: Int, tileH: Int
     ) -> Bool {
+        let pixelCount = tileW * tileH
+        let sampleCount = UInt64(pixelCount) * 3
+        guard sampleCount > 0 else { return false }
+        let thresholdTotal = UInt64(noiseThreshold * 255.0 * Double(sampleCount))
+        let totalDiff = tileDiffSIMD(
+            currentPixels: currentPixels, previousPixels: previousPixels,
+            imageWidth: imageWidth,
+            tileX: tileX, tileY: tileY, tileW: tileW, tileH: tileH,
+            earlyExitThreshold: thresholdTotal
+        )
+        return totalDiff > thresholdTotal
+    }
+
+    /// SIMD-accelerated total BGR diff for a tile. Processes 4 pixels (16 bytes) per
+    /// iteration via `SIMD16<UInt8>`, with scalar cleanup for remainder pixels.
+    /// Supports optional early exit when `earlyExitThreshold` is exceeded.
+    /// Returns the raw sum of per-channel absolute differences (BGR only, alpha skipped).
+    func tileDiffSIMD(
+        currentPixels: UnsafeMutablePointer<UInt8>,
+        previousPixels: UnsafeMutablePointer<UInt8>,
+        imageWidth: Int,
+        tileX: Int, tileY: Int,
+        tileW: Int, tileH: Int,
+        earlyExitThreshold: UInt64 = .max
+    ) -> UInt64 {
         let bytesPerPixel = 4
         let bytesPerRow = imageWidth * bytesPerPixel
         var totalDiff: UInt64 = 0
-        let pixelCount = tileW * tileH
-        // 3 channels (skip alpha)
-        let sampleCount = UInt64(pixelCount) * 3
+
+        let simdStride = 16 // bytes per SIMD vector = 4 pixels
+        let rowBytes = tileW * bytesPerPixel
+        let simdChunks = rowBytes / simdStride
+        let remainderStart = simdChunks * simdStride
+
+        for y in tileY..<(tileY + tileH) {
+            let rowBase = y * bytesPerRow + tileX * bytesPerPixel
+
+            // --- SIMD path: 4 pixels (16 bytes) per iteration ---
+            var chunkOffset = rowBase
+            for _ in 0..<simdChunks {
+                let cur = UnsafeRawPointer(currentPixels + chunkOffset)
+                    .loadUnaligned(as: SIMD16<UInt8>.self)
+                let prev = UnsafeRawPointer(previousPixels + chunkOffset)
+                    .loadUnaligned(as: SIMD16<UInt8>.self)
+
+                // Unsigned absolute difference per lane: max(a,b) - min(a,b)
+                let maxVal = cur.replacing(with: prev, where: cur .< prev)
+                let minVal = cur.replacing(with: prev, where: cur .> prev)
+                let d = maxVal &- minVal
+
+                // Sum BGR channels only (skip alpha at indices 3, 7, 11, 15).
+                let p0 = UInt64(d[0]) &+ UInt64(d[1]) &+ UInt64(d[2])
+                let p1 = UInt64(d[4]) &+ UInt64(d[5]) &+ UInt64(d[6])
+                let p2 = UInt64(d[8]) &+ UInt64(d[9]) &+ UInt64(d[10])
+                let p3 = UInt64(d[12]) &+ UInt64(d[13]) &+ UInt64(d[14])
+
+                totalDiff &+= p0 &+ p1 &+ p2 &+ p3
+                chunkOffset += simdStride
+            }
+
+            // --- Scalar remainder for pixels that don't fill a SIMD vector ---
+            var offset = rowBase + remainderStart
+            let rowEnd = rowBase + rowBytes
+            while offset < rowEnd {
+                let diffB = abs(Int(currentPixels[offset]) - Int(previousPixels[offset]))
+                let diffG = abs(Int(currentPixels[offset + 1]) - Int(previousPixels[offset + 1]))
+                let diffR = abs(Int(currentPixels[offset + 2]) - Int(previousPixels[offset + 2]))
+                totalDiff &+= UInt64(diffB + diffG + diffR)
+                offset += bytesPerPixel
+            }
+
+            // Early exit if we've already exceeded the threshold.
+            if totalDiff > earlyExitThreshold {
+                return totalDiff
+            }
+        }
+
+        return totalDiff
+    }
+
+    /// Scalar reference implementation of tile diff (for testing/benchmarking).
+    /// Returns the same raw BGR diff total as `tileDiffSIMD` but using a simple loop.
+    func tileDiffScalar(
+        currentPixels: UnsafeMutablePointer<UInt8>,
+        previousPixels: UnsafeMutablePointer<UInt8>,
+        imageWidth: Int,
+        tileX: Int, tileY: Int,
+        tileW: Int, tileH: Int
+    ) -> UInt64 {
+        let bytesPerPixel = 4
+        let bytesPerRow = imageWidth * bytesPerPixel
+        var totalDiff: UInt64 = 0
 
         for y in tileY..<(tileY + tileH) {
             let rowOffset = y * bytesPerRow + tileX * bytesPerPixel
             for x in 0..<tileW {
                 let offset = rowOffset + x * bytesPerPixel
-                // BGRA layout: [B, G, R, A]
                 let diffB = abs(Int(currentPixels[offset]) - Int(previousPixels[offset]))
                 let diffG = abs(Int(currentPixels[offset + 1]) - Int(previousPixels[offset + 1]))
                 let diffR = abs(Int(currentPixels[offset + 2]) - Int(previousPixels[offset + 2]))
@@ -210,9 +296,7 @@ final class ImageDiffer: Sendable {
             }
         }
 
-        guard sampleCount > 0 else { return false }
-        let meanDiff = Double(totalDiff) / Double(sampleCount) / 255.0
-        return meanDiff > noiseThreshold
+        return totalDiff
     }
 
     // MARK: - Tile Merging

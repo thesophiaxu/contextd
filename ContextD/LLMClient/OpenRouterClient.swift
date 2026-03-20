@@ -1,12 +1,11 @@
 import Foundation
 
-/// Anthropic Messages API client. Hand-rolled using URLSession.
-/// Supports Claude models (Haiku, Sonnet, Opus) via the /v1/messages endpoint.
-final class AnthropicClient: LLMClient, Sendable {
-    private static let endpoint = URL(string: "https://api.anthropic.com/v1/messages")!
-    private static let apiVersion = "2023-06-01"
+/// OpenRouter API client. Hand-rolled using URLSession.
+/// Supports any model available on OpenRouter via the /api/v1/chat/completions endpoint.
+final class OpenRouterClient: LLMClient, Sendable {
+    private static let endpoint = URL(string: "https://openrouter.ai/api/v1/chat/completions")!
 
-    private let logger = DualLogger(category: "AnthropicClient")
+    private let logger = DualLogger(category: "OpenRouterClient")
 
     /// Maximum number of retry attempts for transient errors.
     private let maxRetries = 3
@@ -92,26 +91,79 @@ final class AnthropicClient: LLMClient, Sendable {
         systemPrompt: String?,
         temperature: Double
     ) -> [String: Any] {
-        var body: [String: Any] = [
+        // OpenRouter uses the OpenAI chat completions format.
+        // The system prompt is a message with role "system".
+        var allMessages: [[String: String]] = []
+
+        if let system = systemPrompt {
+            allMessages.append(["role": "system", "content": system])
+        }
+
+        allMessages.append(contentsOf: messages.map { ["role": $0.role, "content": $0.content] })
+
+        let body: [String: Any] = [
             "model": model,
             "max_tokens": maxTokens,
             "temperature": temperature,
-            "messages": messages.map { ["role": $0.role, "content": $0.content] },
+            "messages": allMessages,
         ]
-
-        if let system = systemPrompt {
-            body["system"] = system
-        }
 
         return body
     }
 
+    func completeWithUsage(
+        messages: [LLMMessage],
+        model: String,
+        maxTokens: Int,
+        systemPrompt: String?,
+        temperature: Double
+    ) async throws -> LLMResponse {
+        guard let apiKey = Self.readAPIKey() else {
+            throw LLMError.noAPIKey
+        }
+
+        let requestBody = buildRequestBody(
+            messages: messages,
+            model: model,
+            maxTokens: maxTokens,
+            systemPrompt: systemPrompt,
+            temperature: temperature
+        )
+
+        var lastError: Error = LLMError.invalidResponse
+
+        for attempt in 0..<maxRetries {
+            do {
+                let response = try await sendRequestFull(body: requestBody, apiKey: apiKey)
+                return response
+            } catch LLMError.rateLimited(let retryAfter) {
+                let delay = retryAfter ?? Double(pow(2.0, Double(attempt)))
+                logger.warning("Rate limited, retrying in \(delay)s (attempt \(attempt + 1)/\(self.maxRetries))")
+                try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                lastError = LLMError.rateLimited(retryAfter: retryAfter)
+            } catch LLMError.httpError(let code, let body) where code >= 500 {
+                let delay = Double(pow(2.0, Double(attempt)))
+                logger.warning("Server error \(code), retrying in \(delay)s (attempt \(attempt + 1)/\(self.maxRetries))")
+                try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                lastError = LLMError.httpError(statusCode: code, body: body)
+            } catch {
+                throw error
+            }
+        }
+
+        throw lastError
+    }
+
     private func sendRequest(body: [String: Any], apiKey: String) async throws -> String {
+        let response = try await sendRequestFull(body: body, apiKey: apiKey)
+        return response.text
+    }
+
+    private func sendRequestFull(body: [String: Any], apiKey: String) async throws -> LLMResponse {
         var request = URLRequest(url: Self.endpoint)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
-        request.setValue(Self.apiVersion, forHTTPHeaderField: "anthropic-version")
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
         request.timeoutInterval = 120
 
@@ -130,7 +182,7 @@ final class AnthropicClient: LLMClient, Sendable {
 
         switch httpResponse.statusCode {
         case 200:
-            return try parseResponse(data: data)
+            return try parseResponseFull(data: data)
         case 429:
             let retryAfter = httpResponse.value(forHTTPHeaderField: "retry-after")
                 .flatMap(TimeInterval.init)
@@ -140,13 +192,23 @@ final class AnthropicClient: LLMClient, Sendable {
         }
     }
 
-    private func parseResponse(data: Data) throws -> String {
+    /// Parse an OpenAI-compatible chat completions response.
+    private func parseResponseFull(data: Data) throws -> LLMResponse {
         guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let content = json["content"] as? [[String: Any]],
-              let firstBlock = content.first,
-              let text = firstBlock["text"] as? String else {
+              let choices = json["choices"] as? [[String: Any]],
+              let firstChoice = choices.first,
+              let message = firstChoice["message"] as? [String: Any],
+              let text = message["content"] as? String else {
             throw LLMError.invalidResponse
         }
-        return text
+
+        var usage: LLMTokenUsage? = nil
+        if let usageDict = json["usage"] as? [String: Any],
+           let inputTokens = usageDict["prompt_tokens"] as? Int,
+           let outputTokens = usageDict["completion_tokens"] as? Int {
+            usage = LLMTokenUsage(inputTokens: inputTokens, outputTokens: outputTokens)
+        }
+
+        return LLMResponse(text: text, usage: usage)
     }
 }

@@ -5,9 +5,9 @@ struct SettingsView: View {
     // API Settings
     @State private var apiKey: String = ""
     @State private var hasApiKey: Bool = false
-    @State private var summarizationModel: String = "claude-haiku-4-5"
-    @State private var enrichmentPass1Model: String = "claude-haiku-4-5"
-    @State private var enrichmentPass2Model: String = "claude-sonnet-4-6"
+    @State private var summarizationModel: String = "anthropic/claude-haiku-4-5"
+    @State private var enrichmentPass1Model: String = "anthropic/claude-haiku-4-5"
+    @State private var enrichmentPass2Model: String = "anthropic/claude-sonnet-4-6"
 
     // Capture Settings
     @AppStorage("captureInterval") private var captureInterval: Double = 2.0
@@ -19,8 +19,33 @@ struct SettingsView: View {
     @AppStorage("summarizationPollInterval") private var pollInterval: Double = 60
     @AppStorage("summarizationMinAge") private var minAge: Double = 300
 
+    // API Server Settings
+    @AppStorage("apiServerEnabled") private var apiServerEnabled: Bool = true
+    @AppStorage("apiServerPort") private var apiServerPort: Int = 21890
+
     // Storage Settings
     @AppStorage("retentionDays") private var retentionDays: Int = 7
+
+    // LLM Token Limits
+    @AppStorage("summarizationMaxTokens") private var summarizationMaxTokens: Int = 1024
+    @AppStorage("enrichmentPass1MaxTokens") private var enrichmentPass1MaxTokens: Int = 1024
+    @AppStorage("enrichmentPass2MaxTokens") private var enrichmentPass2MaxTokens: Int = 2048
+
+    // Context Size Limits
+    @AppStorage("maxSummariesForPass1") private var maxSummariesForPass1: Int = 30
+    @AppStorage("maxCapturesForPass2") private var maxCapturesForPass2: Int = 50
+    @AppStorage("maxSamplesPerChunk") private var maxSamplesPerChunk: Int = 10
+
+    // Capture Formatting Limits (Enrichment)
+    @AppStorage("enrichmentMaxKeyframes") private var enrichmentMaxKeyframes: Int = 10
+    @AppStorage("enrichmentMaxDeltasPerKeyframe") private var enrichmentMaxDeltasPerKeyframe: Int = 5
+    @AppStorage("enrichmentMaxKeyframeTextLength") private var enrichmentMaxKeyframeTextLength: Int = 3000
+    @AppStorage("enrichmentMaxDeltaTextLength") private var enrichmentMaxDeltaTextLength: Int = 500
+
+    // Capture Formatting Limits (Summarization)
+    @AppStorage("summarizationMaxDeltasPerKeyframe") private var summarizationMaxDeltasPerKeyframe: Int = 3
+    @AppStorage("summarizationMaxKeyframeTextLength") private var summarizationMaxKeyframeTextLength: Int = 2000
+    @AppStorage("summarizationMaxDeltaTextLength") private var summarizationMaxDeltaTextLength: Int = 300
 
     // Prompt Templates
     @AppStorage(PromptTemplates.SettingsKey.summarizationSystem.rawValue)
@@ -38,6 +63,7 @@ struct SettingsView: View {
     enum SettingsTab: String, CaseIterable, Identifiable {
         case general = "General"
         case models = "Models"
+        case limits = "Limits"
         case prompts = "Prompts"
         case storage = "Storage"
 
@@ -54,6 +80,10 @@ struct SettingsView: View {
                 .tabItem { Label("Models", systemImage: "cpu") }
                 .tag(SettingsTab.models)
 
+            limitsTab
+                .tabItem { Label("Limits", systemImage: "slider.horizontal.3") }
+                .tag(SettingsTab.limits)
+
             promptsTab
                 .tabItem { Label("Prompts", systemImage: "text.bubble") }
                 .tag(SettingsTab.prompts)
@@ -63,9 +93,9 @@ struct SettingsView: View {
                 .tag(SettingsTab.storage)
         }
         .padding(20)
-        .frame(width: 550, height: 450)
+        .frame(width: 580, height: 500)
         .onAppear {
-            hasApiKey = AnthropicClient.hasAPIKey()
+            hasApiKey = OpenRouterClient.hasAPIKey()
         }
     }
 
@@ -75,7 +105,7 @@ struct SettingsView: View {
         Form {
             Section("API Key") {
                 HStack {
-                    SecureField("Anthropic API Key", text: $apiKey)
+                    SecureField("OpenRouter API Key", text: $apiKey)
                         .textFieldStyle(.roundedBorder)
 
                     Button(action: saveApiKey) {
@@ -126,6 +156,50 @@ struct SettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+
+            Section("API Server") {
+                Toggle("Enable API server", isOn: $apiServerEnabled)
+                    .onChange(of: apiServerEnabled) { _, enabled in
+                        if enabled {
+                            ServiceContainer.shared.startAPIServer()
+                        } else {
+                            ServiceContainer.shared.stopAPIServer()
+                        }
+                    }
+
+                HStack {
+                    Text("Port:")
+                    TextField("Port", value: $apiServerPort, format: .number)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 80)
+
+                    Button("Restart") {
+                        ServiceContainer.shared.stopAPIServer()
+                        ServiceContainer.shared.startAPIServer()
+                    }
+                    .disabled(!apiServerEnabled)
+                }
+
+                if apiServerEnabled {
+                    HStack {
+                        Image(systemName: "network")
+                            .foregroundStyle(.green)
+                        Text("http://127.0.0.1:\(apiServerPort)")
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+
+                        Spacer()
+
+                        Button("Open Docs") {
+                            if let url = URL(string: "http://127.0.0.1:\(apiServerPort)/docs") {
+                                NSWorkspace.shared.open(url)
+                            }
+                        }
+                        .controlSize(.small)
+                    }
+                }
+            }
         }
     }
 
@@ -157,6 +231,89 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
             }
         }
+    }
+
+    // MARK: - Limits Tab
+
+    private var limitsTab: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                limitsSection("Max Response Tokens") {
+                    limitRow("Summarization", value: $summarizationMaxTokens, range: 256...8192, step: 256)
+                    limitRow("Enrichment Pass 1", value: $enrichmentPass1MaxTokens, range: 256...8192, step: 256)
+                    limitRow("Enrichment Pass 2", value: $enrichmentPass2MaxTokens, range: 256...8192, step: 256)
+                }
+
+                limitsSection("Context Retrieval") {
+                    limitRow("Summaries for Pass 1", value: $maxSummariesForPass1, range: 5...100, step: 5)
+                    limitRow("Captures for Pass 2", value: $maxCapturesForPass2, range: 10...200, step: 10)
+                    limitRow("Samples per chunk", value: $maxSamplesPerChunk, range: 3...30, step: 1)
+                }
+
+                limitsSection("Enrichment Formatting") {
+                    limitRow("Keyframes", value: $enrichmentMaxKeyframes, range: 1...30, step: 1)
+                    limitRow("Deltas / keyframe", value: $enrichmentMaxDeltasPerKeyframe, range: 1...15, step: 1)
+                    limitRow("Keyframe text chars", value: $enrichmentMaxKeyframeTextLength, range: 500...10000, step: 500)
+                    limitRow("Delta text chars", value: $enrichmentMaxDeltaTextLength, range: 100...3000, step: 100)
+                }
+
+                limitsSection("Summarization Formatting") {
+                    limitRow("Deltas / keyframe", value: $summarizationMaxDeltasPerKeyframe, range: 1...10, step: 1)
+                    limitRow("Keyframe text chars", value: $summarizationMaxKeyframeTextLength, range: 500...10000, step: 500)
+                    limitRow("Delta text chars", value: $summarizationMaxDeltaTextLength, range: 100...3000, step: 100)
+                }
+
+                Button("Reset All to Defaults") {
+                    resetLimitsToDefaults()
+                }
+                .controlSize(.small)
+            }
+            .padding(.horizontal, 4)
+        }
+    }
+
+    /// A grouped section box for the limits tab.
+    private func limitsSection<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+                .font(.headline)
+            VStack(spacing: 2) {
+                content()
+            }
+        }
+    }
+
+    /// A single settings row: label on the left, value + stepper on the right.
+    private func limitRow(_ label: String, value: Binding<Int>, range: ClosedRange<Int>, step: Int) -> some View {
+        HStack {
+            Text(label)
+                .lineLimit(1)
+            Spacer()
+            Text("\(value.wrappedValue)")
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+                .frame(minWidth: 50, alignment: .trailing)
+            Stepper("", value: value, in: range, step: step)
+                .labelsHidden()
+                .fixedSize()
+        }
+        .padding(.vertical, 2)
+    }
+
+    private func resetLimitsToDefaults() {
+        summarizationMaxTokens = 1024
+        enrichmentPass1MaxTokens = 1024
+        enrichmentPass2MaxTokens = 2048
+        maxSummariesForPass1 = 30
+        maxCapturesForPass2 = 50
+        maxSamplesPerChunk = 10
+        enrichmentMaxKeyframes = 10
+        enrichmentMaxDeltasPerKeyframe = 5
+        enrichmentMaxKeyframeTextLength = 3000
+        enrichmentMaxDeltaTextLength = 500
+        summarizationMaxDeltasPerKeyframe = 3
+        summarizationMaxKeyframeTextLength = 2000
+        summarizationMaxDeltaTextLength = 300
     }
 
     // MARK: - Prompts Tab
@@ -244,7 +401,7 @@ struct SettingsView: View {
 
     private func saveApiKey() {
         do {
-            try AnthropicClient.saveAPIKey(apiKey)
+            try OpenRouterClient.saveAPIKey(apiKey)
             hasApiKey = true
             showApiKeySaved = true
             apiKey = "" // Clear from memory
