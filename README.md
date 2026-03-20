@@ -18,6 +18,8 @@ All data stays on your machine. The only external calls are to the OpenRouter AP
 
 ## Requirements
 
+> **Security Warning**: This assumes that you are aware that contents of your screen would be sent to OpenRouter for summarization. If you don't know what this means or are uncomfortable, ask your coding agent one of the following: "can you check if apple's on-device language model is available, and if so, can you update the code to use that instead?" / "can you swap openrouter with a local llm api? \<insert description of your endpoint\>"
+
 - macOS 14 (Sonoma) or later
 - Swift 5.9+
 - An [OpenRouter](https://openrouter.ai/) API key (for summarization and enrichment)
