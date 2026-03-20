@@ -49,7 +49,7 @@ enum CaptureFormatter {
             let window = kf.windowTitle ?? "Unknown"
             let text = truncate(kf.ocrText, maxLength: maxKeyframeTextLength)
 
-            sections.append("--- Keyframe (\(time)) [\(app) \u{2014} \(window)] ---\n\(text)")
+            sections.append("--- Keyframe (\(time)) [\(app) - \(window)] ---\n\(text)")
 
             // Format selected deltas
             let deltas = group.deltas
@@ -123,7 +123,7 @@ enum CaptureFormatter {
                 if currentKeyframe != nil {
                     currentDeltas.append(capture)
                 } else {
-                    // Orphaned delta — treat as standalone keyframe group
+                    // Orphaned delta - treat as standalone keyframe group
                     // (it has fullOcrText so it's self-contained)
                     groups.append(KeyframeGroup(keyframe: capture, deltas: []))
                 }
