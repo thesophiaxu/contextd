@@ -1,0 +1,15 @@
+[project]
+name = "contextd-mcp"
+version = "0.1.0"
+description = "MCP server bridge for contextd screen context API"
+requires-python = ">=3.11"
+dependencies = [
+    "mcp[cli]",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project.scripts]
+contextd-mcp = "contextd_mcp:mcp.run"
