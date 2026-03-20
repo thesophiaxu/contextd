@@ -18,6 +18,9 @@ final class EnrichmentEngine: ObservableObject {
     private let llmClient: LLMClient
     private let logger = DualLogger(category: "Enrichment")
 
+    /// Handle to the in-flight enrichment task, used for cancellation.
+    private var currentTask: Task<EnrichedResult?, Never>?
+
     var activeStrategy: EnrichmentStrategy {
         strategies[activeStrategyIndex]
     }
@@ -33,10 +36,12 @@ final class EnrichmentEngine: ObservableObject {
     }
 
     /// Enrich a user prompt with context from recent screen activity.
+    ///
+    /// Cancels any previously in-flight enrichment request before starting a new one.
     /// - Parameters:
     ///   - query: The user's prompt text.
     ///   - timeRange: How far back to search for context.
-    /// - Returns: The enriched result.
+    /// - Returns: The enriched result, or nil if cancelled or failed.
     @discardableResult
     func enrich(query: String, timeRange: TimeRange = .last(minutes: 30)) async -> EnrichedResult? {
         guard !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -44,30 +49,68 @@ final class EnrichmentEngine: ObservableObject {
             return nil
         }
 
+        // Cancel any previous in-flight enrichment request
+        currentTask?.cancel()
+
         isProcessing = true
         lastError = nil
         lastResult = nil
 
-        do {
-            let result = try await activeStrategy.enrich(
-                query: query,
-                timeRange: timeRange,
-                storageManager: storageManager,
-                llmClient: llmClient
-            )
+        let strategy = activeStrategy
+        let storage = storageManager
+        let client = llmClient
+        let log = logger
 
-            lastResult = result
-            isProcessing = false
+        let task = Task<EnrichedResult?, Never> { [weak self] in
+            do {
+                let result = try await strategy.enrich(
+                    query: query,
+                    timeRange: timeRange,
+                    storageManager: storage,
+                    llmClient: client
+                )
 
-            logger.info("Enrichment complete: \(result.metadata.summariesSearched) summaries, \(result.metadata.capturesExamined) captures, \(String(format: "%.1f", result.metadata.processingTime))s")
+                // Check cancellation before applying results
+                guard !Task.isCancelled else {
+                    log.debug("Enrichment cancelled, discarding result")
+                    return nil
+                }
 
-            return result
+                await MainActor.run {
+                    self?.lastResult = result
+                    self?.isProcessing = false
+                }
 
-        } catch {
-            lastError = error.localizedDescription
-            isProcessing = false
-            logger.error("Enrichment failed: \(error.localizedDescription)")
-            return nil
+                log.info("Enrichment complete: \(result.metadata.summariesSearched) summaries, \(result.metadata.capturesExamined) captures, \(String(format: "%.1f", result.metadata.processingTime))s")
+
+                return result
+
+            } catch is CancellationError {
+                log.debug("Enrichment task cancelled")
+                await MainActor.run {
+                    self?.isProcessing = false
+                }
+                return nil
+
+            } catch {
+                await MainActor.run {
+                    self?.lastError = error.localizedDescription
+                    self?.isProcessing = false
+                }
+                log.error("Enrichment failed: \(error.localizedDescription)")
+                return nil
+            }
         }
+
+        currentTask = task
+        return await task.value
+    }
+
+    /// Cancel any in-flight enrichment request.
+    func cancelEnrichment() {
+        currentTask?.cancel()
+        currentTask = nil
+        isProcessing = false
+        logger.debug("Enrichment cancelled by user")
     }
 }

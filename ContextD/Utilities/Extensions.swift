@@ -19,18 +19,27 @@ extension String {
 }
 
 extension Date {
+    /// Shared formatters (static let = created once, thread-safe for reads).
+    private static let relativeFormatter: RelativeDateTimeFormatter = {
+        let f = RelativeDateTimeFormatter()
+        f.unitsStyle = .abbreviated
+        return f
+    }()
+
+    private static let shortTimestampFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm:ss"
+        return f
+    }()
+
     /// Format as a human-readable relative time (e.g., "2 min ago").
     var relativeString: String {
-        let formatter = RelativeDateTimeFormatter()
-        formatter.unitsStyle = .abbreviated
-        return formatter.localizedString(for: self, relativeTo: Date())
+        Date.relativeFormatter.localizedString(for: self, relativeTo: Date())
     }
 
     /// Format as a short timestamp string.
     var shortTimestamp: String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "HH:mm:ss"
-        return formatter.string(from: self)
+        Date.shortTimestampFormatter.string(from: self)
     }
 }
 
