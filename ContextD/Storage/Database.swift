@@ -12,15 +12,30 @@ final class AppDatabase: Sendable {
     /// Initialize the database at the default application support location.
     init() throws {
         let dbPath = try AppDatabase.databasePath()
-        dbPool = try DatabasePool(path: dbPath)
+        dbPool = try DatabasePool(path: dbPath, configuration: AppDatabase.makeConfiguration())
         try migrator.migrate(dbPool)
         AppDatabase.logger.info("Database initialized at \(dbPath)")
     }
 
     /// Initialize with a custom path (for testing).
     init(path: String) throws {
-        dbPool = try DatabasePool(path: path)
+        dbPool = try DatabasePool(path: path, configuration: AppDatabase.makeConfiguration())
         try migrator.migrate(dbPool)
+    }
+
+    // MARK: - Configuration
+
+    private static func makeConfiguration() -> Configuration {
+        var config = Configuration()
+        config.prepareDatabase { db in
+            try db.execute(sql: "PRAGMA journal_size_limit = 33554432")  // 32MB WAL limit
+            try db.execute(sql: "PRAGMA synchronous = NORMAL")           // safe with WAL
+            try db.execute(sql: "PRAGMA busy_timeout = 5000")            // 5s retry on contention
+            try db.execute(sql: "PRAGMA mmap_size = 268435456")          // 256MB mmap
+            // Note: auto_vacuum must be set before first table creation.
+            // For existing databases, use incremental_vacuum in maintenance.
+        }
+        return config
     }
 
     // MARK: - Database Path
@@ -41,9 +56,9 @@ final class AppDatabase: Sendable {
     private var migrator: DatabaseMigrator {
         var migrator = DatabaseMigrator()
 
-        // Always reset the database in development for schema changes.
-        // Remove this in production!
-        #if DEBUG
+        // Only erase in unit tests, never in app builds.
+        // DEBUG builds used by users should preserve data.
+        #if TESTING
         migrator.eraseDatabaseOnSchemaChange = true
         #endif
 
@@ -175,6 +190,32 @@ final class AppDatabase: Sendable {
                           columns: ["timestamp"])
             try db.create(index: "idx_token_usage_caller", on: "token_usage",
                           columns: ["caller"])
+        }
+
+        migrator.registerMigration("v3_addCompositeIndexes") { db in
+            // Composite index for the common unsummarized-captures query
+            // (isSummarized filter + timestamp sort).
+            try db.create(index: "idx_captures_unsummarized", on: "captures",
+                          columns: ["isSummarized", "timestamp"], ifNotExists: true)
+
+            // Index on summaries.endTimestamp for prune queries.
+            try db.create(index: "idx_summaries_end", on: "summaries",
+                          columns: ["endTimestamp"], ifNotExists: true)
+
+            // Design note: captures.keyframeId intentionally has no FOREIGN KEY
+            // constraint. Adding one retroactively could break existing data where
+            // keyframes have been pruned but their deltas remain (deltas carry
+            // fullOcrText so they are self-contained). Pruning code handles
+            // orphaned deltas gracefully.
+        }
+
+        migrator.registerMigration("v4_addEmbeddingColumn") { db in
+            // Nullable embedding column for TF-IDF vectors for semantic search.
+            // Stored as raw Float bytes in a BLOB. Nullable for gradual backfill
+            // of existing summaries.
+            try db.alter(table: "summaries") { t in
+                t.add(column: "embedding", .blob)
+            }
         }
 
         return migrator

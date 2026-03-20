@@ -42,3 +42,6 @@ xcuserdata/
 
 # Build outputs
 *.app/
+*.pyc
+__pycache__/
+.ruff_cache/
