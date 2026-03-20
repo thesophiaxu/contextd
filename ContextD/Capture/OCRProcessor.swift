@@ -13,6 +13,10 @@ final class OCRProcessor: Sendable {
         let fullText: String
 
         /// Individual text regions with bounding boxes and confidence.
+        // TODO: These regions (bounding boxes) are computed but never persisted to the database.
+        // CaptureRecord does not store ocrRegions. The overhead is minimal compared to the OCR
+        // pass itself, but if spatial queries are never needed, this could be removed to save
+        // allocations. Keep for now in case spatial search is added later.
         let regions: [OCRRegion]
     }
 
@@ -181,12 +185,24 @@ final class OCRProcessor: Sendable {
 
             // Translate bounding box from crop-local normalized coords to full-image normalized coords.
             // Vision bounding boxes are normalized [0,1] with origin at bottom-left.
+            // cropBounds is in pixel space (top-left origin from CGImage.cropping).
             let cropBox = observation.boundingBox
+
+            // Convert crop pixel bounds to full-image normalized coords (top-left origin)
+            let cropTopInFull = cropBounds.origin.y / fullImageSize.height
+            let cropHeightNorm = cropBounds.height / fullImageSize.height
+            let cropLeftInFull = cropBounds.origin.x / fullImageSize.width
+            let cropWidthNorm = cropBounds.width / fullImageSize.width
+
+            // Vision's y=0 is bottom of crop, y=1 is top of crop.
+            // In full-image top-left coords: top of crop = cropTopInFull,
+            // bottom of crop = cropTopInFull + cropHeightNorm.
+            // Vision box top (in full image) = cropTopInFull + (1 - cropBox.maxY) * cropHeightNorm
             let fullBox = CGRect(
-                x: (cropBounds.origin.x + cropBox.origin.x * cropBounds.width) / fullImageSize.width,
-                y: (cropBounds.origin.y + cropBox.origin.y * cropBounds.height) / fullImageSize.height,
-                width: (cropBox.width * cropBounds.width) / fullImageSize.width,
-                height: (cropBox.height * cropBounds.height) / fullImageSize.height
+                x: cropLeftInFull + cropBox.origin.x * cropWidthNorm,
+                y: cropTopInFull + (1.0 - cropBox.origin.y - cropBox.height) * cropHeightNorm,
+                width: cropBox.width * cropWidthNorm,
+                height: cropBox.height * cropHeightNorm
             )
 
             let region = OCRRegion(
